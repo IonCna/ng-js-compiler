@@ -127,6 +127,92 @@ describe("DecoratorWriter", () => {
     ]);
   });
 
+  it("selector compuesto (tag[atributo]): el factory guarda el tag, avisa en consola y devuelve un objeto vacío si no matchea — el constructor real nunca corre", () => {
+    const directive: DirectiveMetadata = {
+      ...component({ className: "ButtonLabel" }),
+      kind: "directive",
+      options: { selector: "button[ngbButtonLabel]" },
+    };
+    MetadataStore.set("button-label.ts", [directive]);
+
+    const output = DecoratorWriter.write("class ButtonLabel {}", "button-label.ts")!;
+
+    expect(output).toContain(
+      'if (["button"].indexOf($element[0].tagName.toLowerCase()) === -1) { console.warn("ButtonLabel: este selector requiere <button>, no se aplica en <" + $element[0].tagName.toLowerCase() + ">."); return {}; }',
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ButtonLabel = evaluate(output, "ButtonLabel") as unknown as new () => object;
+    const fac = (ButtonLabel as unknown as { ɵfac: unknown }).ɵfac as [
+      string,
+      string,
+      (element: unknown, scope: unknown) => Record<string, unknown>,
+    ];
+
+    // Tag equivocado: no construye la clase real, avisa, devuelve {} — bindToController pisaría props ahí sin romper nada.
+    const mismatched = fac[2]({ 0: { tagName: "LABEL" } }, {});
+    expect(mismatched).toEqual({});
+    expect(mismatched).not.toBeInstanceOf(ButtonLabel);
+    expect(warn).toHaveBeenCalledWith("ButtonLabel: este selector requiere <button>, no se aplica en <label>.");
+
+    // Tag correcto: construye normal.
+    const matched = fac[2]({ 0: { tagName: "BUTTON" } }, {});
+    expect(matched).toBeInstanceOf(ButtonLabel);
+
+    warn.mockRestore();
+  });
+
+  it("lista por coma, todas compuestas con el mismo atributo (\"button[x], label[x]\"): el guard acepta cualquiera de los tags", () => {
+    const directive: DirectiveMetadata = {
+      ...component({ className: "ButtonLabel" }),
+      kind: "directive",
+      options: { selector: "button[ngbButtonLabel], label[ngbButtonLabel]" },
+    };
+    MetadataStore.set("button-label.ts", [directive]);
+
+    const output = DecoratorWriter.write("class ButtonLabel {}", "button-label.ts")!;
+
+    expect(output).toContain('if (["button","label"].indexOf($element[0].tagName.toLowerCase()) === -1)');
+
+    const ButtonLabel = evaluate(output, "ButtonLabel") as unknown as new () => object;
+    const fac = (ButtonLabel as unknown as { ɵfac: unknown }).ɵfac as [
+      string,
+      string,
+      (element: unknown, scope: unknown) => Record<string, unknown>,
+    ];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect(fac[2]({ 0: { tagName: "BUTTON" } }, {})).toBeInstanceOf(ButtonLabel);
+    expect(fac[2]({ 0: { tagName: "LABEL" } }, {})).toBeInstanceOf(ButtonLabel);
+    expect(fac[2]({ 0: { tagName: "SPAN" } }, {})).not.toBeInstanceOf(ButtonLabel);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    warn.mockRestore();
+  });
+
+  it("lista por coma mixta (una compuesta + una sin tag, \"[foo], button[bar]\"): sin guard — no se sabe cuál alternativa matcheó", () => {
+    const directive: DirectiveMetadata = {
+      ...component({ className: "Mixed" }),
+      kind: "directive",
+      options: { selector: "[foo], button[bar]" },
+    };
+    MetadataStore.set("mixed.ts", [directive]);
+
+    const output = DecoratorWriter.write("class Mixed {}", "mixed.ts")!;
+
+    expect(output).not.toContain("tagName");
+    expect(output).not.toContain("console.warn");
+  });
+
+  it("selector simple ([atributo] o tag): sin guard de tag en el factory", () => {
+    MetadataStore.set("card.ts", [component({ options: { selector: "app-card" } })]);
+
+    const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
+
+    expect(output).not.toContain("tagName");
+    expect(output).not.toContain("console.warn");
+  });
+
   it("selector no soportado (clases) es error claro", () => {
     MetadataStore.set("card.ts", [component({ options: { selector: ".card" } })]);
 

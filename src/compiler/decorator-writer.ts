@@ -3,6 +3,7 @@ import { LifecycleWiring } from "@/compiler/lifecycle-wiring.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { PlatformCode } from "@/compiler/platform-code.ts";
 import { ScopedProviders } from "@/compiler/scoped-providers.ts";
+import { SelectorParser } from "@/compiler/selector-parser.ts";
 import type {
   ComponentMetadata,
   DecoratorMetadata,
@@ -87,12 +88,53 @@ export class DecoratorWriter {
       return `${className}.ɵfac = [${[...deps, factory].join(", ")}];`;
     }
 
+    const guard = DecoratorWriter.tagGuardStatement(metadata);
     const wiring = HostWiring.hasAny(metadata) ? HostWiring.statements(metadata, className) : [];
     const factoryParams = [ctorParams, ...HostWiring.FACTORY_DEPS].filter((param) => param.length > 0).join(", ");
-    const body = [`var instance = new ${className}(${ctorParams});`, ...wiring, "return instance;"].join(" ");
+    const body = [guard, `var instance = new ${className}(${ctorParams});`, ...wiring, "return instance;"].filter(Boolean).join(" ");
     const allDeps = [...deps, ...HostWiring.FACTORY_DEPS.map((dep) => JSON.stringify(dep))];
 
     return `${className}.ɵfac = [${[...allDeps, `function ${className}_Factory(${factoryParams}) { ${body} }`].join(", ")}];`;
+  }
+
+  /**
+   * `tag[atributo]` se registra bajo el atributo (`SelectorParser`) — AngularJS matchea por nombre, no sabe
+   * filtrar por tag a la vez, así que `bindToController`/el controller se instanciarían igual en cualquier
+   * elemento con ese atributo. El único punto donde SÍ se puede decidir es acá: el factory recién construye
+   * la instancia real si el tag matchea; si no, devuelve un objeto vacío — `bindToController` pisa props ahí
+   * sin que nadie las lea, y el constructor real (con toda su lógica) nunca corre.
+   *
+   * Con lista por coma (`"button[x], label[x]"`) TODAS las alternativas comparten este mismo `ɵfac` — el
+   * guard acepta cualquiera de los tags exigidos (unión), no uno solo. Si ALGUNA alternativa no exige tag
+   * (`[attr]` simple mezclado con una compuesta), no se puede armar ningún guard sin romper esa alternativa
+   * sin restricción — nadie sabe, al construir, cuál nombre de la lista fue el que realmente matcheó.
+   *
+   * Si `SelectorParser` no reconoce el selector (`attr=value` — sí lo entiende `ivySelectors` de
+   * `defStatement`, un parser aparte para el estampado Ivy) no es cosa de esta función decidir que está
+   * mal: sin guard, y que lo valide quien corresponda más adelante en el pipeline.
+   */
+  private static tagGuardStatement(metadata: BindingsCarrier): string {
+    const { selector } = metadata.options as { selector: string };
+    const requiredTags = DecoratorWriter.tryParseRequiredTags(selector);
+    if (!requiredTags) return "";
+
+    const tags = JSON.stringify(requiredTags.map((tag) => tag.toLowerCase()));
+    const warning = JSON.stringify(`${metadata.className}: este selector requiere <${requiredTags.join("> o <")}>, no se aplica en <`);
+    return `if (${tags}.indexOf($element[0].tagName.toLowerCase()) === -1) { console.warn(${warning} + $element[0].tagName.toLowerCase() + ">."); return {}; }`;
+  }
+
+  /** `undefined` = sin guard: selector no parseable acá, o alguna alternativa de la lista no exige tag. */
+  private static tryParseRequiredTags(selector: string): string[] | undefined {
+    let alternatives;
+    try {
+      alternatives = SelectorParser.parse(selector);
+    } catch {
+      return undefined;
+    }
+
+    const tags = alternatives.map((parsed) => parsed.requiredTag);
+    if (tags.some((tag) => tag === undefined)) return undefined;
+    return [...new Set(tags as string[])];
   }
 
   private static provStatement(metadata: ServiceMetadata): string {

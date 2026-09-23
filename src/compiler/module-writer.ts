@@ -4,7 +4,7 @@ import { ComponentBindings } from "@/compiler/component-bindings.ts";
 import { HashId } from "@/compiler/hash-id.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { ScopedInjectorRuntime } from "@/compiler/scoped-injector-runtime.ts";
-import { SelectorParser } from "@/compiler/selector-parser.ts";
+import { type ParsedSelector, SelectorParser } from "@/compiler/selector-parser.ts";
 import type {
   ComponentMetadata,
   DirectiveMetadata,
@@ -67,8 +67,8 @@ export class ModuleWriter {
     const calls = [
       ...ModuleWriter.providerCalls(node),
       ...(attachScopedInjector ? [ScopedInjectorRuntime.decoratorFragment()] : []),
-      ...node.declarations.components.map(ModuleWriter.componentCall),
-      ...node.declarations.directives.map(ModuleWriter.directiveCall),
+      ...node.declarations.components.flatMap(ModuleWriter.componentCall),
+      ...node.declarations.directives.flatMap(ModuleWriter.directiveCall),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),
     ];
 
@@ -89,8 +89,9 @@ export class ModuleWriter {
       }
 
       const { selector } = (component.metadata as ComponentMetadata).options as { selector: string };
-      if (SelectorParser.parse(selector).restrict !== "E") {
-        throw new Error(`ModuleWriter: "${name}" (bootstrap) necesita un selector de elemento, no ${JSON.stringify(selector)}.`);
+      const alternatives = SelectorParser.parse(selector);
+      if (alternatives.length !== 1 || alternatives[0]!.restrict !== "E") {
+        throw new Error(`ModuleWriter: "${name}" (bootstrap) necesita un selector de elemento simple, no ${JSON.stringify(selector)}.`);
       }
       return selector.trim();
     });
@@ -156,14 +157,37 @@ export class ModuleWriter {
     return HashId.readable(node.className, node.path);
   }
 
-  private static componentCall(node: ApplicationNode): string {
+  /**
+   * Varias alternativas de una lista por coma pueden compartir `registrationName` (mismo atributo, distinto
+   * tag, ej. `"button[x], label[x]"`) — el guard de `DecoratorWriter.tagGuardStatement` ya acepta cualquiera
+   * de los tags, así que registrar dos veces bajo el mismo nombre no suma nada y AngularJS lo rechaza
+   * (`$compile:multidir`: dos directivas pidiendo el mismo `controllerAs` en el mismo elemento).
+   */
+  private static uniqueByName(alternatives: ParsedSelector[]): ParsedSelector[] {
+    const seen = new Set<string>();
+    return alternatives.filter((parsed) => {
+      if (seen.has(parsed.registrationName)) return false;
+      seen.add(parsed.registrationName);
+      return true;
+    });
+  }
+
+  /**
+   * Una lista por coma registra una vez por nombre único (mismo `controller`/bindings, distinto nombre) —
+   * pero TODAS las alternativas se validan antes de deduplicar: si una alternativa inválida comparte nombre
+   * con una válida, el dedupe la taparía y el error nunca saldría.
+   */
+  private static componentCall(node: ApplicationNode): string[] {
     const metadata = node.metadata as ComponentMetadata;
     const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
-    const parsed = SelectorParser.parse(options.selector);
-    if (parsed.restrict !== "E") {
-      throw new Error(
-        `ModuleWriter: "${node.className}" tiene selector de atributo (${JSON.stringify(options.selector)}) — @Component con selector de atributo no soportado todavía.`,
-      );
+    const alternatives = SelectorParser.parse(options.selector);
+
+    for (const parsed of alternatives) {
+      if (parsed.restrict !== "E") {
+        throw new Error(
+          `ModuleWriter: "${node.className}" tiene selector de atributo (${JSON.stringify(options.selector)}) — @Component con selector de atributo no soportado todavía.`,
+        );
+      }
     }
 
     const bindings = ComponentBindings.from(metadata.inputs, metadata.outputs);
@@ -173,25 +197,29 @@ export class ModuleWriter {
     fields.push(`controllerAs: ${JSON.stringify(options.controllerAs ?? "$ctrl")}`);
     if (Object.keys(bindings).length) fields.push(`bindings: ${JSON.stringify(bindings)}`);
 
-    return `.component(${JSON.stringify(parsed.registrationName)}, { ${fields.join(", ")} })`;
+    return ModuleWriter.uniqueByName(alternatives).map(
+      (parsed) => `.component(${JSON.stringify(parsed.registrationName)}, { ${fields.join(", ")} })`,
+    );
   }
 
-  private static directiveCall(node: ApplicationNode): string {
+  private static directiveCall(node: ApplicationNode): string[] {
     const metadata = node.metadata as DirectiveMetadata;
     const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
-    const parsed = SelectorParser.parse(options.selector);
+    const alternatives = ModuleWriter.uniqueByName(SelectorParser.parse(options.selector));
     const bindings = ComponentBindings.from(metadata.inputs, metadata.outputs);
 
-    const fields = [
-      `controller: ${node.className}.ɵfac`,
-      `restrict: ${JSON.stringify(parsed.restrict)}`,
-      `bindToController: ${Object.keys(bindings).length ? JSON.stringify(bindings) : "true"}`,
-      `controllerAs: ${JSON.stringify(options.controllerAs ?? parsed.registrationName)}`,
-    ];
-    if (options.template !== undefined) fields.push(`template: ${JSON.stringify(options.template)}`);
-    if (options.templateUrl !== undefined) fields.push(`templateUrl: ${JSON.stringify(options.templateUrl)}`);
+    return alternatives.map((parsed) => {
+      const fields = [
+        `controller: ${node.className}.ɵfac`,
+        `restrict: ${JSON.stringify(parsed.restrict)}`,
+        `bindToController: ${Object.keys(bindings).length ? JSON.stringify(bindings) : "true"}`,
+        `controllerAs: ${JSON.stringify(options.controllerAs ?? parsed.registrationName)}`,
+      ];
+      if (options.template !== undefined) fields.push(`template: ${JSON.stringify(options.template)}`);
+      if (options.templateUrl !== undefined) fields.push(`templateUrl: ${JSON.stringify(options.templateUrl)}`);
 
-    return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${fields.join(", ")} }; })`;
+      return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${fields.join(", ")} }; })`;
+    });
   }
 
   /** La instancia sale de `ɵfac` vía `$injector.invoke` (con sus deps de constructor); el filtro delega en `transform` con `value` + args extra. */

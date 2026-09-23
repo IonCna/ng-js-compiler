@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type { IAngularStatic, auto } from "angular";
 import { build } from "esbuild";
 import { JSDOM } from "jsdom";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HashId } from "@/compiler/hash-id.ts";
 import { TokenName } from "@/compiler/token-name.ts";
 import { pluginLoader } from "@/esbuild/plugin-loader.ts";
@@ -451,6 +451,96 @@ export class AppModule {}
     controller.calls.length = 0;
     $rootScope.$destroy();
     expect(controller.calls).toEqual(["onDestroy"]);
+  });
+
+  it("selector compuesto (tag[atributo]): activa en el tag correcto, queda inerte (sin romper la página) en el equivocado", async () => {
+    await write(
+      "button-label.directive.ts",
+      `import { Directive, Input } from "ngjs-core";
+
+@Directive({ selector: "button[ngbButtonLabel]" })
+export class ButtonLabelDirective {
+  @Input() ngbButtonLabel!: string;
+  applied = true;
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { ButtonLabelDirective } from "./button-label.directive";
+
+@NgModule({ declarations: [ButtonLabelDirective], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { dom, angular } = await bootstrap(
+      `<button ngb-button-label="'ok'"></button><label ngb-button-label="'nope'"></label>`,
+    );
+
+    const button = dom.window.document.querySelector("button")!;
+    const label = dom.window.document.querySelector("label")!;
+    const buttonCtrl = angular.element(button).controller("ngbButtonLabel") as { applied?: boolean; ngbButtonLabel?: string };
+    const labelCtrl = angular.element(label).controller("ngbButtonLabel") as { applied?: boolean };
+
+    // Tag correcto: la clase real corrió, con su binding.
+    expect(buttonCtrl.applied).toBe(true);
+    expect(buttonCtrl.ngbButtonLabel).toBe("ok");
+    // Tag equivocado: nunca se construyó la clase real — bindToController sigue pisando el binding
+    // (inofensivo, nadie lo lee), pero "applied" (que solo pone el constructor real) nunca aparece.
+    expect(labelCtrl.applied).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("ButtonLabelDirective: este selector requiere <button>"));
+    // El resto de la página sigue viva — nada explotó por el <label> con el atributo puesto.
+    expect(dom.window.document.querySelector("label")).not.toBeNull();
+
+    warn.mockRestore();
+  });
+
+  it("lista de selectores por coma (\"button[x], label[x]\"): la misma clase activa en cualquiera de los tags permitidos", async () => {
+    await write(
+      "button-label.directive.ts",
+      `import { Directive, Input } from "ngjs-core";
+
+@Directive({ selector: "button[ngbButtonLabel], label[ngbButtonLabel]" })
+export class ButtonLabelDirective {
+  @Input() ngbButtonLabel!: string;
+  applied = true;
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { ButtonLabelDirective } from "./button-label.directive";
+
+@NgModule({ declarations: [ButtonLabelDirective], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { dom, angular } = await bootstrap(
+      `<button ngb-button-label="'ok'"></button><label ngb-button-label="'tambien-ok'"></label><span ngb-button-label="'nope'"></span>`,
+    );
+
+    const ctrlOf = (tag: string) =>
+      angular.element(dom.window.document.querySelector(tag)!).controller("ngbButtonLabel") as {
+        applied?: boolean;
+        ngbButtonLabel?: string;
+      };
+
+    // Las dos alternativas de la lista activan la MISMA clase real.
+    expect(ctrlOf("button").applied).toBe(true);
+    expect(ctrlOf("label").applied).toBe(true);
+    // Un tag que no está en ninguna alternativa de la lista: inerte, como el caso simple.
+    expect(ctrlOf("span").applied).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("este selector requiere <button> o <label>"));
+
+    warn.mockRestore();
   });
 
   it("platformBrowserDynamic().bootstrapModule(): función real, módulo raíz con providedIn root, providers del módulo pisan al root, monta <app-root>", async () => {

@@ -172,6 +172,90 @@ export class CardComponent {}
     );
   });
 
+  it("lista de selectores por coma con nombres distintos: una registración por alternativa", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+import { NavLinkDirective } from "./nav-link.directive.ts";
+
+@NgModule({ declarations: [NavLinkDirective], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write(
+      join(dir, "nav-link.directive.ts"),
+      `import { Directive } from "ngjs-core";
+
+@Directive({ selector: "[ngbNavLink], [ngbNavItem]" })
+export class NavLinkDirective {}
+`,
+    );
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+    expect(output).toContain('.directive("ngbNavLink", function ()');
+    expect(output).toContain('.directive("ngbNavItem", function ()');
+  });
+
+  it("lista de selectores por coma con el MISMO nombre (\"button[x], label[x]\"): una sola registración — AngularJS rechaza dos directivas pidiendo el mismo controllerAs en el mismo elemento", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+import { ButtonLabelDirective } from "./button-label.directive.ts";
+
+@NgModule({ declarations: [ButtonLabelDirective], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write(
+      join(dir, "button-label.directive.ts"),
+      `import { Directive } from "ngjs-core";
+
+@Directive({ selector: "button[ngbButtonLabel], label[ngbButtonLabel]" })
+export class ButtonLabelDirective {}
+`,
+    );
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+    const matches = [...output.matchAll(/\.directive\("ngbButtonLabel", function/g)];
+    expect(matches).toHaveLength(1);
+  });
+
+  it("un @Component con una lista de selectores donde alguna alternativa no es de elemento tira error", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component.ts";
+
+@NgModule({ declarations: [CardComponent], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write(
+      join(dir, "card.component.ts"),
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-card, [appCard]" })
+export class CardComponent {}
+`,
+    );
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+
+    expect(() => new ModuleWriter(scanner).write("export class AppModule {}", modulePath)).toThrow(
+      /selector de atributo.*no soportado/,
+    );
+  });
+
   it("el id es determinista para el mismo path+className", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(
