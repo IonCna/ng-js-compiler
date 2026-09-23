@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentMetadata, DirectiveMetadata } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 import { DecoratorWriter } from "@/compiler/decorator-writer.ts";
@@ -145,6 +145,83 @@ describe("DecoratorWriter", () => {
 
     expect(output).toContain('UpperPipe.ɵpipe = { name: "upper", pure: true };');
     expect(output).toContain('NowPipe.ɵpipe = { name: "now", pure: false };');
+  });
+
+  it("sin @HostBinding/@HostListener, el factory no agrega $element/$scope", () => {
+    MetadataStore.set("card.ts", [component()]);
+
+    const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
+
+    expect(output).not.toContain("$element");
+    expect(output).not.toContain("$scope");
+  });
+
+  it("con @HostBinding/@HostListener: el factory agrega $element/$scope, aplica el binding vía $watch, llama al listener dentro de $apply y limpia todo en $destroy", () => {
+    MetadataStore.set("card.ts", [
+      component({
+        hostBindings: [{ propName: "isOpen", hostProperty: "class.open" }],
+        hostListeners: [{ methodName: "onClick", eventName: "click", args: ["$event"] }],
+      }),
+    ]);
+
+    const output = DecoratorWriter.write(
+      "class CardComponent { isOpen = false; onClick(event) { this.lastEvent = event; } }",
+      "card.ts",
+    )!;
+
+    expect(output).toContain('CardComponent.ɵfac = ["$element", "$scope", function CardComponent_Factory($element, $scope)');
+
+    const fac = evaluate(output, "CardComponent").ɵfac as [string, string, (element: unknown, scope: unknown) => Record<string, unknown>];
+
+    const addClass = vi.fn();
+    const removeClass = vi.fn();
+    const on = vi.fn();
+    const off = vi.fn();
+    const $element = { addClass, removeClass, on, off };
+
+    const watches: { watchFn: () => unknown; listenerFn: (value: unknown) => void; unwatch: () => void }[] = [];
+    let destroyHandler: (() => void) | undefined;
+    const $scope = {
+      $watch: (watchFn: () => unknown, listenerFn: (value: unknown) => void) => {
+        const unwatch = vi.fn();
+        watches.push({ watchFn, listenerFn, unwatch });
+        return unwatch;
+      },
+      $on: (event: string, handler: () => void) => {
+        if (event === "$destroy") destroyHandler = handler;
+      },
+      $apply: (fn: () => void) => fn(),
+      $root: { $$phase: null as string | null },
+    };
+
+    const instance = fac[2]($element, $scope) as { isOpen: boolean; onClick(event: unknown): void; lastEvent?: unknown };
+
+    // @HostBinding vía $watch: se aplica cuando el watcher dispara, no al construir.
+    expect(watches).toHaveLength(1);
+    expect(watches[0]!.watchFn()).toBe(false);
+    watches[0]!.listenerFn(true);
+    expect(addClass).toHaveBeenCalledWith("open");
+    watches[0]!.listenerFn(false);
+    expect(removeClass).toHaveBeenCalledWith("open");
+
+    // @HostListener: $element.on con el nombre del evento, $event pasado tal cual, adentro de $scope.$apply.
+    expect(on).toHaveBeenCalledWith("click", expect.any(Function));
+    const handler = on.mock.calls[0]![1] as (event: unknown) => void;
+    handler({ type: "click" });
+    expect(instance.lastEvent).toEqual({ type: "click" });
+
+    // Safe apply: si ya hay un digest en curso, no llama $apply (tiraría "digest already in progress") — llama directo.
+    const apply = vi.spyOn($scope, "$apply");
+    $scope.$root.$$phase = "$digest";
+    handler({ type: "click", phase: "digest" });
+    expect(instance.lastEvent).toEqual({ type: "click", phase: "digest" });
+    expect(apply).not.toHaveBeenCalled();
+    $scope.$root.$$phase = null;
+
+    // $destroy: desregistra el watch y saca el listener.
+    destroyHandler?.();
+    expect(watches[0]!.unwatch).toHaveBeenCalled();
+    expect(off).toHaveBeenCalledWith("click", handler);
   });
 
   it("ignora 'ngmodule' — eso lo procesa ModuleWriter, no acá", () => {

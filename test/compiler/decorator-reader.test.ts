@@ -138,7 +138,7 @@ describe("decoratorReaderTransform", () => {
     ]);
     expect(metadata.outputs).toEqual([{ propName: "closed", bindingName: "closed" }]);
     expect(metadata.hostBindings).toEqual([{ propName: "isOpen", hostProperty: "class.open" }]);
-    expect(metadata.hostListeners).toEqual([{ methodName: "onClick", eventName: "click" }]);
+    expect(metadata.hostListeners).toEqual([{ methodName: "onClick", eventName: "click", args: ["$event"] }]);
   });
 
   it("lee providers de @Component/@Directive (clase suelta, token por su import)", async () => {

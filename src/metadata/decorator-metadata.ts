@@ -45,7 +45,12 @@ export interface BindingsMetadata {
   inputs: { propName: string; bindingName: string }[];
   outputs: { propName: string; bindingName: string }[];
   hostBindings: { propName: string; hostProperty: string }[];
-  hostListeners: { methodName: string; eventName: string }[];
+  /**
+   * `args` son las expresiones del segundo argumento de `@HostListener` (`['$event', '$event.target']`),
+   * ya validadas en build: cada una tiene que empezar con `$event` (nada más se resuelve). Sin segundo
+   * argumento (`@HostListener('click')`) queda `[]` — el método se llama sin parámetros, como en Angular real.
+   */
+  hostListeners: { methodName: string; eventName: string; args: string[] }[];
   /** Solo se lee — todavía no se emite nada con ellos (providers a nivel componente es un ítem aparte). */
   providers: ProviderMetadata[];
 }

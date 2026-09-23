@@ -171,7 +171,7 @@ export class DecoratorReader {
           options,
           constructorTokens,
           constructorImports,
-          ...DecoratorReader.readBindings(cls.body, stripSpans),
+          ...DecoratorReader.readBindings(cls.body, stripSpans, className),
           providers: DecoratorReader.readProviders(objExpr, className, context),
         };
       }
@@ -366,7 +366,7 @@ export class DecoratorReader {
     return Buffer.from(context.code, "utf8").subarray(start - 1, end - 1).toString("utf8");
   }
 
-  private static readBindings(members: ClassMember[], stripSpans: Span[]): ClassBindings {
+  private static readBindings(members: ClassMember[], stripSpans: Span[], owner: string): ClassBindings {
     const bindings: ClassBindings = { inputs: [], outputs: [], hostBindings: [], hostListeners: [] };
 
     for (const member of members) {
@@ -391,14 +391,36 @@ export class DecoratorReader {
 
         for (const decorator of member.function.decorators ?? []) {
           if (DecoratorReader.decoratorCallName(decorator) !== "HostListener") continue;
-          const [eventName] = DecoratorReader.decoratorArgs(decorator);
-          bindings.hostListeners.push({ methodName: name, eventName: typeof eventName === "string" ? eventName : "" });
+          const [eventName, args] = DecoratorReader.decoratorArgs(decorator);
+          bindings.hostListeners.push({
+            methodName: name,
+            eventName: typeof eventName === "string" ? eventName : "",
+            args: DecoratorReader.hostListenerArgs(args, owner, name),
+          });
           stripSpans.push(decorator.span);
         }
       }
     }
 
     return bindings;
+  }
+
+  /**
+   * `['$event', '$event.target']` de `@HostListener` — cada expresión tiene que empezar con `$event`
+   * (lo único que existe para traducir: el evento nativo del `addEventListener`); cualquier otra cosa
+   * (una variable, un servicio inyectado) no se puede resolver en build, así que es error, no se ignora.
+   */
+  private static hostListenerArgs(args: unknown, owner: string, methodName: string): string[] {
+    if (args === undefined) return [];
+    if (!Array.isArray(args)) {
+      throw new Error(`DecoratorReader: "${owner}.${methodName}" — el segundo argumento de @HostListener tiene que ser un array literal.`);
+    }
+    return args.map((arg) => {
+      if (typeof arg === "string" && (arg === "$event" || arg.startsWith("$event."))) return arg;
+      throw new Error(
+        `DecoratorReader: "${owner}.${methodName}" — @HostListener solo soporta expresiones "$event"/"$event.algo", no ${JSON.stringify(arg)}.`,
+      );
+    });
   }
 
   /**

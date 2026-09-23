@@ -1,3 +1,4 @@
+import { HostWiring } from "@/compiler/host-wiring.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { PlatformCode } from "@/compiler/platform-code.ts";
 import type {
@@ -60,14 +61,30 @@ export class DecoratorWriter {
     return statements;
   }
 
-  /** `a0, a1, ...` en vez de los nombres originales del constructor — el factory solo los pasa en orden. */
+  /**
+   * `a0, a1, ...` en vez de los nombres originales del constructor — el factory solo los pasa en
+   * orden. Con `@HostBinding`/`@HostListener` el factory pasa a necesitar `$element`/`$scope`
+   * (`HostWiring.FACTORY_DEPS`) además de las deps del constructor, y envuelve la instancia en vez
+   * de devolverla directo — sin ninguno de los dos, el factory queda igual que siempre.
+   */
   private static facStatement(metadata: WritableMetadata): string {
     const { className, constructorTokens } = metadata;
-    const params = constructorTokens.map((_, index) => `a${index}`).join(", ");
-    const factory = `function ${className}_Factory(${params}) { return new ${className}(${params}); }`;
+    const ctorParams = constructorTokens.map((_, index) => `a${index}`).join(", ");
     const deps = constructorTokens.map((token) => JSON.stringify(token));
 
-    return `${className}.ɵfac = [${[...deps, factory].join(", ")}];`;
+    const bindings = metadata.kind === "component" || metadata.kind === "directive" ? metadata : undefined;
+    const wiring = bindings && HostWiring.hasAny(bindings) ? HostWiring.statements(bindings, className) : [];
+
+    if (!wiring.length) {
+      const factory = `function ${className}_Factory(${ctorParams}) { return new ${className}(${ctorParams}); }`;
+      return `${className}.ɵfac = [${[...deps, factory].join(", ")}];`;
+    }
+
+    const factoryParams = [ctorParams, ...HostWiring.FACTORY_DEPS].filter((param) => param.length > 0).join(", ");
+    const body = [`var instance = new ${className}(${ctorParams});`, ...wiring, "return instance;"].join(" ");
+    const allDeps = [...deps, ...HostWiring.FACTORY_DEPS.map((dep) => JSON.stringify(dep))];
+
+    return `${className}.ɵfac = [${[...allDeps, `function ${className}_Factory(${factoryParams}) { ${body} }`].join(", ")}];`;
   }
 
   private static provStatement(metadata: ServiceMetadata): string {

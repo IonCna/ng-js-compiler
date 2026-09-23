@@ -258,6 +258,54 @@ export class AppModule {}
     expect(injector.get("ext")).toBe("from lib");
   });
 
+  it("@HostBinding/@HostListener: $watch aplica la clase, $element.on corre dentro de $apply, $destroy limpia todo", async () => {
+    await write(
+      "toggle.component.ts",
+      `import { Component, HostBinding, HostListener } from "ngjs-core";
+
+@Component({ selector: "app-toggle", template: "" })
+export class ToggleComponent {
+  @HostBinding("class.active") active = false;
+  clicks = 0;
+
+  @HostListener("click", ["$event"])
+  onClick(event: MouseEvent): void {
+    this.clicks++;
+    this.active = true;
+  }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { ToggleComponent } from "./toggle.component";
+
+@NgModule({ declarations: [ToggleComponent], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap(`<app-toggle></app-toggle>`);
+    const el = dom.window.document.querySelector("app-toggle")!;
+    const controller = angular.element(el).controller("appToggle") as { clicks: number; active: boolean };
+    const rootScope = injector.get<{ $digest(): void; $destroy(): void }>("$rootScope");
+
+    expect(el.classList.contains("active")).toBe(false);
+
+    // El listener nativo corre fuera del digest de Angular — $apply adentro del handler es lo que hace
+    // que el cambio de `active` (y el $watch del host binding) se refleje sin un $digest externo.
+    el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    expect(controller.clicks).toBe(1);
+    expect(el.classList.contains("active")).toBe(true);
+
+    // $destroy (acá, de toda la app) desregistra el listener nativo: un click después no hace nada.
+    rootScope.$destroy();
+    el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    expect(controller.clicks).toBe(1);
+  });
+
   it("platformBrowserDynamic().bootstrapModule(): función real, módulo raíz con providedIn root, providers del módulo pisan al root, monta <app-root>", async () => {
     await write(
       "logger.ts",
