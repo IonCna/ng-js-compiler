@@ -18,9 +18,14 @@
     "./vite": {
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js"
+    },
+    "./contract": {
+      "types": "./dist/contract.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "author": "Max Flores",
   "scripts": {
@@ -37,8 +42,12 @@
     "vite": ">=5.0.0"
   },
   "peerDependenciesMeta": {
-    "esbuild": { "optional": true },
-    "vite": { "optional": true }
+    "esbuild": {
+      "optional": true
+    },
+    "vite": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/angular": "^1.8.9",

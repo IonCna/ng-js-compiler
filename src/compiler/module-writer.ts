@@ -96,6 +96,7 @@ export class ModuleWriter {
       ...node.declarations.components.flatMap(ModuleWriter.componentCall),
       ...node.declarations.directives.flatMap(ModuleWriter.directiveCall),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),
+      ...ModuleWriter.instanceCalls(node),
     ];
 
     // `providers` de los `ModuleWithProviders` antes que los propios (encadenados después): el propio gana, como Angular.
@@ -125,6 +126,17 @@ export class ModuleWriter {
       }
       return selector.trim();
     });
+  }
+
+  /**
+   * Como el injector de Angular: la clase del módulo es un provider más (inyectable por su token) y se instancia
+   * al crear el injector, tenga o no constructor. El `.run` la pide sin esperar a que alguien la inyecte; AngularJS
+   * corre los run blocks de los módulos requeridos antes que los del que los requiere — importados primero.
+   */
+  private static instanceCalls(node: ApplicationNode): string[] {
+    const { token } = node.metadata as NgModuleMetadata;
+    const key = JSON.stringify(token);
+    return [`.factory(${key}, ${node.className}.ɵfac)`, `.run([${key}, function () {}])`];
   }
 
   /**

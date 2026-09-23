@@ -65,7 +65,6 @@ export class ApplicationScanner {
             ? [metadata.recipe].filter((recipe): recipe is ProviderMetadata => recipe !== undefined)
             : [];
       if (providers.some(ApplicationScanner.providerUsesFlags)) return true;
-      if (metadata.kind === "ngmodule") continue;
       if (metadata.constructorFlags.some(ResolveDependency.hasFlags) || metadata.injectTokens.some((injected) => ResolveDependency.hasFlags(injected.flags))) return true;
     }
     return false;

@@ -1,10 +1,10 @@
 import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
 import { SelectorParser } from "@/compiler/selector-parser.ts";
 import { TokenName } from "@/compiler/token-name.ts";
-import type { DecoratorMetadata, InjectFlags, NgModuleMetadata } from "@/metadata/decorator-metadata.ts";
+import type { DecoratorMetadata, InjectFlags } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
-type ClassMetadata = Exclude<DecoratorMetadata, NgModuleMetadata>;
+type ClassMetadata = DecoratorMetadata;
 
 /** jqLite `data()` que cada `@Component` deja en su elemento (valor: el propio elemento) — el límite de `@Host`. */
 export const HOST_DATA_KEY = "$ngjsHost";

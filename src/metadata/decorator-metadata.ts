@@ -21,9 +21,12 @@ export interface InjectDep {
   flags: InjectFlags;
 }
 
-interface BaseMetadata {
+/**
+ * Cómo se construye la clase (su `ɵfac`) — lo comparten todos los decoradores, `@NgModule` incluido: Angular
+ * instancia la clase del módulo al crear su injector, con DI en el constructor.
+ */
+export interface ConstructionMetadata {
   className: string;
-  options: Record<string, unknown>;
   /**
    * `extends Base` — el nombre exportado de la base (también si se importó con alias). Si es una clase decorada del
    * proyecto, `ClassHierarchy` hereda de ella el constructor, los `inject()` y los bindings.
@@ -56,6 +59,10 @@ interface BaseMetadata {
    * registraría); `DecoratorWriter` emite un import de efecto por cada uno, como la referencia de valor de Ivy.
    */
   constructorImports: string[];
+}
+
+interface BaseMetadata extends ConstructionMetadata {
+  options: Record<string, unknown>;
 }
 
 /**
@@ -177,10 +184,14 @@ export type ModuleImport =
  * Sin `id`: el `id` real de `angular.module(...)` sale de un hash (`HashId`,
  * en `ModuleWriter`), determinista — el módulo que importa a otro calcula el
  * mismo id sin esperar a que ese otro archivo se haya procesado.
+ *
+ * Como en Angular, la clase se instancia (con DI) al crear el injector del módulo; hereda de su base decorada
+ * solo el constructor (`ClassHierarchy`), nunca `declarations`/`imports`/`providers`/`bootstrap`.
  */
-export interface NgModuleMetadata {
+export interface NgModuleMetadata extends ConstructionMetadata {
   kind: "ngmodule";
-  className: string;
+  /** Nombre de DI de la propia clase (`TokenName`) — la clase del módulo es inyectable, como en Angular. */
+  token: string;
   declarations: string[];
   imports: ModuleImport[];
   providers: ProviderMetadata[];

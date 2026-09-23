@@ -587,6 +587,39 @@ describe("decoratorReaderTransform", () => {
     expect(metadata.controllerAs).toBe("vm");
   });
 
+  it("@NgModule: lee su constructor (DI, flags, inject()), su base y su token — Angular instancia la clase del módulo", async () => {
+    const code = `
+      import { Logger } from "./logger";
+      import { BaseModule } from "./base.module";
+      @NgModule({ declarations: [], imports: [] })
+      export class AppModule extends BaseModule {
+        readonly config = inject(Config);
+        constructor(@Optional() logger: Logger) { super(); }
+      }
+    `;
+
+    const result = await decoratorReaderTransform.transform(code, "app.module.ts");
+    const [metadata] = MetadataStore.get("app.module.ts") as [NgModuleMetadata];
+
+    expect(metadata.token).toBe(own("AppModule"));
+    expect(metadata.superClass).toBe("BaseModule");
+    expect(metadata.hasConstructor).toBe(true);
+    expect(metadata.constructorTokens).toEqual([own("Logger")]);
+    expect(metadata.constructorFlags).toEqual([{ optional: true }]);
+    expect(metadata.injectTokens).toEqual([{ token: own("Config"), flags: {} }]);
+    expect(metadata.constructorImports).toEqual(["./logger"]);
+    expect(result).not.toContain("@Optional");
+  });
+
+  it("@NgModule: @Attribute() en el constructor es error (no hay host)", async () => {
+    const code = `
+      @NgModule({ declarations: [], imports: [] })
+      export class AppModule { constructor(@Attribute("x") x: string) {} }
+    `;
+
+    await expect(decoratorReaderTransform.transform(code, "app.module.ts")).rejects.toThrow(/@Attribute\(\) solo existe en @Component\/@Directive/);
+  });
+
   it("lee más de una clase decorada por archivo", async () => {
     const code = `
       @Injectable() export class AService {}

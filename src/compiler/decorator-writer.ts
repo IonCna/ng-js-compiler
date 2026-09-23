@@ -16,7 +16,6 @@ import type {
   HostDirectiveMetadata,
   InjectDep,
   InjectFlags,
-  NgModuleMetadata,
   PipeMetadata,
   QueryMetadata,
   ServiceMetadata,
@@ -24,7 +23,7 @@ import type {
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
 type BindingsCarrier = ComponentMetadata | DirectiveMetadata;
-type WritableMetadata = Exclude<DecoratorMetadata, NgModuleMetadata>;
+type WritableMetadata = DecoratorMetadata;
 
 /**
  * Fase 2: lee lo que guardó `DecoratorReader` en `MetadataStore` y estampa en
@@ -34,7 +33,7 @@ type WritableMetadata = Exclude<DecoratorMetadata, NgModuleMetadata>;
  * - `ClassName.ɵfac` — factory con anotación en array de AngularJS:
  *   `["Dep_hash", ..., function X_Factory(a0, ...) { return new X(a0, ...); }]`.
  *   Los nombres de DI ya vienen resueltos (`TokenName`). Es lo que `ModuleWriter`
- *   registra (`controller:`, factory de servicio, instancia de pipe).
+ *   registra (`controller:`, factory de servicio, instancia de pipe, instancia del `@NgModule`).
  * - `ClassName.ɵprov` — `{ token, providedIn? }` de `@Injectable`/`@Service`; con `providedIn: "root"` además se
  *   anota en la cola de la plataforma (`PlatformCode.rootProviderStatement`).
  * - `ClassName.ɵcmp`/`ɵdir` — `{ selectors, inputs, outputs, exportAs? }` con
@@ -45,8 +44,7 @@ type WritableMetadata = Exclude<DecoratorMetadata, NgModuleMetadata>;
  */
 export class DecoratorWriter {
   static write(code: string, path: string): string | undefined {
-    const writable = MetadataStore.get(path).filter((metadata): metadata is WritableMetadata => metadata.kind !== "ngmodule");
-    const statements = writable.flatMap((metadata) => DecoratorWriter.statementsFor(metadata));
+    const statements = MetadataStore.get(path).flatMap((metadata) => DecoratorWriter.statementsFor(metadata));
     // Una directiva/componente inyectada se lee del elemento con este helper (`ElementInstances`), uno por archivo.
     if (statements.some((statement) => statement.includes("ɵelementInstance("))) statements.push(ElementInstances.helperSource());
     return statements.length ? `${code}\n${statements.join("\n")}\n` : undefined;
@@ -72,6 +70,9 @@ export class DecoratorWriter {
         break;
       case "pipe":
         statements.push(DecoratorWriter.pipeStatement(metadata));
+        break;
+      case "ngmodule":
+        // Solo `ɵfac`: `ɵmod` y la registración (con la instancia eager) los emite `ModuleWriter`.
         break;
       default:
         statements.push(DecoratorWriter.provStatement(metadata));

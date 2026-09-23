@@ -258,6 +258,93 @@ export class AppModule {}
     expect(injector.get("ext")).toBe("from lib");
   });
 
+  describe("instancia de la clase @NgModule (como el injector de Angular)", () => {
+    it("se instancia al arrancar con DI en el constructor e inject(), importados antes que el importador, y es inyectable (misma instancia)", async () => {
+      await write(
+        "trail.ts",
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Trail { entries: string[] = []; }
+`,
+      );
+      await write(
+        "feature.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { Trail } from "./trail";
+
+@NgModule({ declarations: [], imports: [] })
+export class FeatureModule {
+  constructor(trail: Trail) { trail.entries.push("feature"); }
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { Inject, NgModule, inject } from "ngjs-core";
+import { FeatureModule } from "./feature.module";
+import { Trail } from "./trail";
+
+@NgModule({ declarations: [], imports: [FeatureModule], providers: [Trail, { provide: "greeting", useValue: "hola" }] })
+export class AppModule {
+  readonly trail = inject(Trail);
+  constructor(@Inject("greeting") readonly greeting: string) { this.trail.entries.push("app:" + greeting); }
+}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      const { injector } = await bootstrap("");
+
+      const trail = injector.get<{ entries: string[] }>(TokenName.of("Trail", "test-app"));
+      expect(trail.entries).toEqual(["feature", "app:hola"]);
+      const app = injector.get<{ greeting: string; trail: unknown }>(TokenName.of("AppModule", "test-app"));
+      expect(app.greeting).toBe("hola");
+      expect(app.trail).toBe(trail);
+      expect(trail.entries).toHaveLength(2); // inyectarla no la vuelve a construir
+    });
+
+    it("herencia: hereda el constructor (DI) de su base decorada, pero no sus declarations/imports/providers", async () => {
+      await write(
+        "services.ts",
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Logger { entries: string[] = []; }
+`,
+      );
+      await write(
+        "base.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { Logger } from "./services";
+
+@NgModule({ declarations: [], imports: [], providers: [{ provide: "fromBase", useValue: "base" }] })
+export class BaseModule {
+  constructor(readonly logger: Logger) { logger.entries.push((this.constructor as { name: string }).name); }
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { BaseModule } from "./base.module";
+import { Logger } from "./services";
+
+@NgModule({ declarations: [], imports: [], providers: [Logger] })
+export class AppModule extends BaseModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      const { injector } = await bootstrap("");
+
+      const logger = injector.get<{ entries: string[] }>(TokenName.of("Logger", "test-app"));
+      expect(logger.entries).toEqual(["AppModule"]); // la base no es importada: solo se construye la subclase
+      expect(injector.get<{ logger: unknown }>(TokenName.of("AppModule", "test-app")).logger).toBe(logger);
+      expect(injector.has("fromBase")).toBe(false);
+    });
+  });
+
   it("imports con llamada: ModuleWithProviders importa ngModule y registra sus providers (los propios ganan); otra llamada es un módulo más", async () => {
     // Paquete ya compilado con ngjs: `forRoot()` devuelve `{ ngModule, providers }`, como en Angular.
     await mkdir(join(dir, "node_modules", "ext-config"), { recursive: true });

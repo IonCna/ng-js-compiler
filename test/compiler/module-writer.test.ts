@@ -115,6 +115,24 @@ export class FeatureModule {}
     expect(appOutput).toMatch(/angular\.module\("AppModule_[0-9a-f]{8}", \[FeatureModule\.ɵmod\.id\]\)/);
   });
 
+  it("la clase del módulo se registra por su token con su ɵfac y un run block la instancia al arrancar", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+
+@NgModule({ declarations: [], imports: [] })
+export class AppModule {}
+`,
+    );
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+    expect(output).toMatch(/\n {2}\.factory\("(AppModule_[0-9a-f]{8})", AppModule\.ɵfac\)\n {2}\.run\(\["\1", function \(\) \{\}\]\);/);
+  });
+
   it("inputs/outputs de un componente se traducen a bindings", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(

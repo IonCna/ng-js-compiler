@@ -398,11 +398,22 @@ describe("DecoratorWriter", () => {
     expect(off).toHaveBeenCalledWith("click", handler);
   });
 
-  it("ignora 'ngmodule' — eso lo procesa ModuleWriter, no acá", () => {
+  it("@NgModule: solo ɵfac (con DI del constructor, sin $element/$scope) — ɵmod y la registración son de ModuleWriter", () => {
     MetadataStore.set("app.module.ts", [
-      { kind: "ngmodule", className: "AppModule", declarations: [], imports: [], providers: [], bootstrap: [] },
+      {
+        kind: "ngmodule",
+        className: "AppModule",
+        token: "AppModule_1a2b3c4d",
+        constructorTokens: ["Logger_1a2b3c4d"], constructorFlags: [{}], constructorAttributes: [null], injectTokens: [], constructorImports: [],
+        declarations: [], imports: [], providers: [], bootstrap: [],
+      },
     ]);
 
-    expect(DecoratorWriter.write("class AppModule {}", "app.module.ts")).toBeUndefined();
+    const output = DecoratorWriter.write("class AppModule { constructor(l) { this.l = l; } }", "app.module.ts")!;
+
+    expect(output).toContain('AppModule.ɵfac = ["Logger_1a2b3c4d", function AppModule_Factory(a0) { return new AppModule(a0); }];');
+    expect(output).not.toContain("ɵprov");
+    const fac = evaluate(output, "AppModule").ɵfac as [string, (logger: unknown) => { l: unknown }];
+    expect(fac[1]("the-logger")).toMatchObject({ l: "the-logger" });
   });
 });

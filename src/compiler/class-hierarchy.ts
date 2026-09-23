@@ -1,8 +1,8 @@
-import type { BindingsMetadata, DecoratorMetadata, InjectDep, NgModuleMetadata } from "@/metadata/decorator-metadata.ts";
+import type { BindingsMetadata, ConstructionMetadata, DecoratorMetadata, InjectDep } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
-type ClassMetadata = Exclude<DecoratorMetadata, NgModuleMetadata>;
-type ConstructorMetadata = Pick<ClassMetadata, "constructorTokens" | "constructorFlags" | "constructorAttributes">;
+type ClassMetadata = DecoratorMetadata;
+type ConstructorMetadata = Pick<ConstructionMetadata, "constructorTokens" | "constructorFlags" | "constructorAttributes">;
 type ElementBindings = Omit<BindingsMetadata, "providers">;
 
 /**
@@ -11,6 +11,10 @@ type ElementBindings = Omit<BindingsMetadata, "providers">;
  * - el constructor: una clase sin `constructor` propio usa el de su ancestro más cercano que lo declare;
  * - los `inject()` de construcción: los de cada clase de la cadena, cada uno con su clave (`InjectedValues`);
  * - en `@Component`/`@Directive`, inputs/outputs/host y lifecycle de los ancestros elemento, el hijo pisa al padre.
+ *
+ * Un `@NgModule` entra en la cadena como cualquier clase decorada (su `ɵfac` hereda el constructor, como en Ivy),
+ * pero de su base no hereda `declarations`/`imports`/`providers`/`bootstrap` — Ivy no tiene feature de herencia
+ * para módulos; `ModuleWriter` lee solo la metadata propia del nodo.
  *
  * La cadena corta en la primera base que no es una clase decorada del proyecto (otra librería, o sin decorador —
  * una base sin decorador que use features de Angular ya es error en `DecoratorReader`, como en Angular).
@@ -21,7 +25,7 @@ export class ClassHierarchy {
     const chain = [metadata];
     for (let current = metadata; current.superClass; ) {
       const parent = MetadataStore.findClass(current.superClass);
-      if (!parent || parent.kind === "ngmodule" || chain.includes(parent)) break;
+      if (!parent || chain.includes(parent)) break;
       chain.unshift(parent);
       current = parent;
     }

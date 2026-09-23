@@ -214,19 +214,6 @@ export class DecoratorReader {
       const argExpr = DecoratorReader.decoratorFirstArgExpression(decorator);
       const objExpr = argExpr?.type === "ObjectExpression" ? argExpr : undefined;
 
-      if (kind === "ngmodule") {
-        return {
-          kind,
-          className,
-          declarations: DecoratorReader.identifierArray(objExpr, "declarations"),
-          imports: DecoratorReader.readModuleImports(objExpr, className, context),
-          providers: DecoratorReader.readProviders(objExpr, className, context),
-          bootstrap: DecoratorReader.identifierArray(objExpr, "bootstrap"),
-          controllerAs: DecoratorReader.stringProp(objExpr, "controllerAs"),
-        };
-      }
-
-      const options = DecoratorReader.decoratorFirstArgObject(decorator);
       const ctor = DecoratorReader.readConstructorTokens(cls, kind, stripSpans, context);
       const injected = DecoratorReader.readInjectCalls(cls, stripSpans, context);
       const superClass = cls.superClass?.type === "Identifier" ? (context.imports.get(cls.superClass.value)?.symbol ?? cls.superClass.value) : undefined;
@@ -239,6 +226,23 @@ export class DecoratorReader {
         injectTokens: injected.injectTokens,
         constructorImports: [...new Set([...ctor.constructorImports, ...injected.imports])],
       };
+
+      if (kind === "ngmodule") {
+        // Angular instancia la clase del módulo al crear su injector: su constructor lleva DI como cualquier clase.
+        return {
+          kind,
+          className,
+          ...construction,
+          token: DecoratorReader.diName(className, context),
+          declarations: DecoratorReader.identifierArray(objExpr, "declarations"),
+          imports: DecoratorReader.readModuleImports(objExpr, className, context),
+          providers: DecoratorReader.readProviders(objExpr, className, context),
+          bootstrap: DecoratorReader.identifierArray(objExpr, "bootstrap"),
+          controllerAs: DecoratorReader.stringProp(objExpr, "controllerAs"),
+        };
+      }
+
+      const options = DecoratorReader.decoratorFirstArgObject(decorator);
 
       if (kind === "component" || kind === "directive") {
         return {
