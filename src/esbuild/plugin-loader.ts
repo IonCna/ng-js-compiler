@@ -33,6 +33,13 @@ export function pluginLoader(
       if (projectType === "application") {
         const { banner } = build.initialOptions;
         build.initialOptions.banner = { ...banner, js: PlatformCode.banner(banner?.js) };
+
+        // `ZonePatchesRuntime` parchea `Promise.prototype.then`, pero eso NO intercepta `async/await` nativo
+        // (probado en V8 real: cero intercepciones) — a `target: "es2016"` esbuild baja `async/await` a un
+        // helper basado en generadores que sí llama `.then()` por debajo, así el patch los agarra igual.
+        // Si el proyecto ya pide un `target` propio, se respeta tal cual (puede ser más bajo — downlevelea
+        // igual o más — o más alto a propósito, sabiendo que entonces `await` no dispara digest solo).
+        if (build.initialOptions.target === undefined) build.initialOptions.target = "es2016";
       }
 
       build.onStart(async () => {

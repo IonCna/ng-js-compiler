@@ -61,6 +61,38 @@ describe("viteTransformPlugin", () => {
     expect(plugin.transformIndexHtml()).toEqual([]);
   });
 
+  it("config(): fuerza target 'es2016' en una aplicación si el proyecto no pidió uno propio", () => {
+    const plugin = viteTransformPlugin(".", []);
+    // @ts-expect-error — `config` en el tipo `Plugin` de Vite puede ser objeto/función; acá siempre es función.
+    expect(plugin.config({})).toEqual({ esbuild: { target: "es2016" } });
+  });
+
+  it("config(): no pisa un target que el proyecto ya pidió", () => {
+    const plugin = viteTransformPlugin(".", []);
+    // @ts-expect-error — ver nota arriba.
+    expect(plugin.config({ esbuild: { target: "es2020" } })).toBeUndefined();
+  });
+
+  it("config(): respeta esbuild: false (el proyecto lo desactivó a propósito)", () => {
+    const plugin = viteTransformPlugin(".", []);
+    // @ts-expect-error — ver nota arriba.
+    expect(plugin.config({ esbuild: false })).toBeUndefined();
+  });
+
+  it("config(): conserva el resto de las opciones de esbuild que ya hubiera", () => {
+    const plugin = viteTransformPlugin(".", []);
+    // @ts-expect-error — ver nota arriba.
+    expect(plugin.config({ esbuild: { jsxInject: "import React from 'react'" } })).toEqual({
+      esbuild: { jsxInject: "import React from 'react'", target: "es2016" },
+    });
+  });
+
+  it("config(): en una librería no toca nada", () => {
+    const plugin = viteTransformPlugin(".", [], "library");
+    // @ts-expect-error — ver nota arriba.
+    expect(plugin.config({})).toBeUndefined();
+  });
+
   it("devuelve undefined si ningún transform cambió el código", async () => {
     const noop: NgjsTransform = { async transform() { return undefined; } };
 

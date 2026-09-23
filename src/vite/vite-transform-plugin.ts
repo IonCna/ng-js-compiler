@@ -33,6 +33,20 @@ export function viteTransformPlugin(
     transformIndexHtml() {
       return projectType === "application" ? [PlatformCode.htmlTag()] : [];
     },
+    /**
+     * `ZonePatchesRuntime` (ver `platform-code.ts`) parchea `Promise.prototype.then`, que NO intercepta
+     * `async/await` nativo (probado en V8 real: cero intercepciones) — a `target: "es2016"` esbuild baja
+     * `async/await` a un helper basado en generadores que sí llama `.then()` por debajo, así el patch lo
+     * agarra igual. Vite usa esbuild para transformar cada archivo (dev y build), mismo mecanismo que
+     * `pluginLoader` (esbuild). Si el proyecto ya pide un `target` propio, o desactivó esbuild
+     * (`esbuild: false`), se respeta tal cual — no se pisa una elección explícita.
+     */
+    config(userConfig) {
+      if (projectType !== "application") return;
+      if (userConfig.esbuild === false) return;
+      if (userConfig.esbuild?.target !== undefined) return;
+      return { esbuild: { ...userConfig.esbuild, target: "es2016" } };
+    },
     async transform(code, id) {
       if (!id.endsWith(".ts")) return;
 

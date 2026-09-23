@@ -636,4 +636,92 @@ const modules: Record<string, unknown> = { app: AppModule };
     expect(appRoot?.textContent).toBe("Ana (module)");
     expect(injector.get<{ source(): string }>(TokenName.of("Logger", "test-app")).source()).toBe("module");
   });
+
+  it("patches globales automáticos: async/await, setTimeout y un addEventListener nativo actualizan la vista solos, sin digest manual (sin NgZone — esa clase la provee ngjs-core, no este compilador)", async () => {
+    await write(
+      "counter.component.ts",
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-counter", template: "<span>{{ $ctrl.value }}</span>" })
+export class CounterComponent {
+  value = 0;
+
+  async loadAsync(): Promise<void> {
+    await Promise.resolve();
+    this.value = 2;
+  }
+
+  afterTimeout(): void {
+    setTimeout(() => { this.value = 3; }, 0);
+  }
+
+  wireNativeClick(el: Element): void {
+    el.addEventListener("click", () => { this.value = 4; });
+  }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { CounterComponent } from "./counter.component";
+
+@NgModule({ declarations: [CounterComponent], imports: [], bootstrap: [CounterComponent] })
+export class AppModule {}
+`,
+    );
+    await mkdir(join(dir, "node_modules", "ngjs-core"), { recursive: true });
+    await writeFile(join(dir, "node_modules", "ngjs-core", "package.json"), JSON.stringify({ name: "ngjs-core", main: "index.js" }), "utf8");
+    await writeFile(
+      join(dir, "node_modules", "ngjs-core", "index.js"),
+      `export const platformBrowserDynamic = () => globalThis.ɵngjsPlatform;\n`,
+      "utf8",
+    );
+    await write(
+      "main.ts",
+      `import { platformBrowserDynamic } from "ngjs-core";
+import { AppModule } from "./app.module";
+
+(window as unknown as { app: Promise<unknown> }).app = platformBrowserDynamic().bootstrapModule(AppModule);
+`,
+    );
+
+    const result = await build({
+      entryPoints: [join(dir, "main.ts")],
+      bundle: true,
+      write: false,
+      format: "iife",
+      logLevel: "silent",
+      nodePaths: [NODE_MODULES],
+      plugins: [pluginLoader(dir)],
+    });
+
+    const dom = new JSDOM(`<body></body>`, { runScripts: "outside-only" });
+    dom.window.eval(result.outputFiles[0]!.text);
+    await (dom.window as unknown as { app: Promise<unknown> }).app;
+
+    const el = dom.window.document.querySelector("app-counter")!;
+    const controller = dom.window.angular.element(el).controller("appCounter") as {
+      loadAsync(): Promise<void>;
+      afterTimeout(): void;
+      wireNativeClick(el: Element): void;
+    };
+    const text = () => el.querySelector("span")!.textContent;
+
+    // async/await real (no un .then() escrito a mano) — depende de que esbuild haya bajado el target
+    // a es2016 (helper basado en generadores que sí llama .then() por debajo) y de que Promise.prototype.then
+    // esté parcheado. Sin esto, `value` cambiaría pero la vista NUNCA se enteraría.
+    await controller.loadAsync();
+    expect(text()).toBe("2");
+
+    // setTimeout nativo.
+    controller.afterTimeout();
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
+    expect(text()).toBe("3");
+
+    // addEventListener nativo, sin ng-click ni nada de AngularJS de por medio.
+    controller.wireNativeClick(el);
+    el.dispatchEvent(new dom.window.Event("click"));
+    expect(text()).toBe("4");
+  });
 });

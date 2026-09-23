@@ -1,8 +1,11 @@
+import { ZonePatchesRuntime } from "@/compiler/zone-patches-runtime.ts";
+
 /** Como `projectType` de `angular.json`: una librería nunca arranca nada, solo una aplicación lleva la plataforma. */
 export type ProjectType = "application" | "library";
 
 const PLATFORM_GLOBAL = "ɵngjsPlatform";
 const ROOT_PROVIDERS_GLOBAL = "ɵngjsRootProviders";
+const ROOT_SCOPE_GLOBAL = "ɵngjsRootScope";
 const ROOT_MODULE = "ɵroot";
 const ROOT_PROVIDERS_MODULE = "ɵroot.providers";
 
@@ -19,6 +22,11 @@ const ROOT_PROVIDERS_MODULE = "ɵroot.providers";
  * `bootstrapModule` arma los módulos raíz al correr: `ɵroot.providers` con esa cola, y `ɵroot` que depende
  * de él PRIMERO y después del módulo arrancado (AngularJS carga los `requires` en orden y el último registro
  * gana: así un provider del `@NgModule` pisa al root, como en Angular).
+ *
+ * También estampa `ZonePatchesRuntime` (mismo gate: `projectType: "application"`) — los patches globales
+ * (`setTimeout`/`setInterval`/`addEventListener`/`Promise.then`) para que cualquier cosa que dispare
+ * trabajo async termine en un digest, sin ninguna clase `NgZone` ni Zone.js real de por medio. Ver ese
+ * archivo.
  */
 export class PlatformCode {
   /** El código de la plataforma, JS plano; lo único que lee es lo que el compilador estampó (`ɵmod`, `ɵfac`). */
@@ -37,13 +45,18 @@ export class PlatformCode {
             angular.module(${JSON.stringify(ROOT_MODULE)}, [${JSON.stringify(ROOT_PROVIDERS_MODULE)}, moduleType.ɵmod.id]);
             var host = document.body;
             (moduleType.ɵmod.bootstrap || []).forEach(function (tag) { if (!host.querySelector(tag)) host.appendChild(document.createElement(tag)); });
-            resolve(angular.bootstrap(host, [${JSON.stringify(ROOT_MODULE)}]));
+            var injector = angular.bootstrap(host, [${JSON.stringify(ROOT_MODULE)}]);
+            // El patch de ZonePatchesRuntime (setTimeout/addEventListener/Promise.then) necesita ESTE
+            // $rootScope para saber a qué aplicarle $apply — no existe hasta que el bootstrap de verdad corrió.
+            globalThis.${ROOT_SCOPE_GLOBAL} = injector.get("$rootScope");
+            resolve(injector);
           } catch (error) { reject(error); }
         });
       });
     },
   };
-})();`;
+})();
+${ZonePatchesRuntime.source()}`;
   }
 
   /** Lo que emite cada `@Injectable({ providedIn: "root" })` junto a su `ɵprov`: se anota en la cola de la plataforma. */
