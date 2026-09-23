@@ -171,6 +171,10 @@ declare global {
   var ɵngjsRootProviders: [DiName, Annotation][] | undefined;
   /** El `$rootScope` de la app arrancada — lo usan los patches globales para disparar el digest. */
   var ɵngjsRootScope: IRootScopeService | undefined;
+  /** El `$injector` de la app arrancada — lo usa `inject()` fuera de una construcción. */
+  var ɵngjsInjector: auto.IInjectorService | undefined;
+  /** Initializadores registrados por `provideAppInitializer()` antes del bootstrap. */
+  var ɵngjsAppInitializers: ((injector: auto.IInjectorService) => void | Promise<unknown>)[] | undefined;
   /** Valores de los `inject()` de construcción, por clase dueña — solo mientras corre un factory. */
   var ɵngjsInjected: Record<string, unknown[]> | undefined;
 }

@@ -7,6 +7,7 @@ export type ProjectType = "application" | "library";
 const PLATFORM_GLOBAL = "ɵngjsPlatform";
 const ROOT_PROVIDERS_GLOBAL = "ɵngjsRootProviders";
 const ROOT_SCOPE_GLOBAL = "ɵngjsRootScope";
+const INJECTOR_GLOBAL = "ɵngjsInjector";
 const ROOT_MODULE = "ɵroot";
 const ROOT_PROVIDERS_MODULE = "ɵroot.providers";
 
@@ -52,7 +53,12 @@ export class PlatformCode {
             // El patch de ZonePatchesRuntime (setTimeout/addEventListener/Promise.then) necesita ESTE
             // $rootScope para saber a qué aplicarle $apply — no existe hasta que el bootstrap de verdad corrió.
             globalThis.${ROOT_SCOPE_GLOBAL} = injector.get("$rootScope");
-            resolve(injector);
+            globalThis.${INJECTOR_GLOBAL} = injector;
+            var initializers = globalThis.ɵngjsAppInitializers || [];
+            globalThis.ɵngjsAppInitializers = [];
+            Promise.all(initializers.map(function (initializer) { return initializer(injector); })).then(function () {
+              resolve(injector);
+            }, reject);
           } catch (error) { reject(error); }
         });
       });
