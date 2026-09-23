@@ -245,6 +245,46 @@ export class CardComponent {}
     await expect(new ApplicationScanner().scan(dir)).rejects.toThrow('"CardComponent" está en imports de "AppModule" pero no es @NgModule.');
   });
 
+  it("hasScopedProviders(): true si algún component/directive del proyecto tiene providers propios, false si no", async () => {
+    await writeFile(
+      join(dir, "card.component.ts"),
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-card" })
+export class CardComponent {}
+`,
+      "utf8",
+    );
+
+    const withoutProviders = new ApplicationScanner();
+    await withoutProviders.scan(dir);
+    expect(withoutProviders.hasScopedProviders()).toBe(false);
+
+    await writeFile(
+      join(dir, "user.service.ts"),
+      `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class UserService {}
+`,
+      "utf8",
+    );
+    await writeFile(
+      join(dir, "highlight.directive.ts"),
+      `import { Directive } from "ngjs-core";
+import { UserService } from "./user.service.ts";
+
+@Directive({ selector: "[appHighlight]", providers: [UserService] })
+export class HighlightDirective {}
+`,
+      "utf8",
+    );
+
+    const withProviders = new ApplicationScanner();
+    await withProviders.scan(dir);
+    expect(withProviders.hasScopedProviders()).toBe(true);
+  });
+
   it("dos clases decoradas con el mismo nombre en el proyecto es error (chocarían en el nombre de DI)", async () => {
     await mkdir(join(dir, "a"), { recursive: true });
     await mkdir(join(dir, "b"), { recursive: true });

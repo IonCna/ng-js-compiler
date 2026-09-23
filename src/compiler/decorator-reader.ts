@@ -48,6 +48,18 @@ const CLASS_DECORATOR_KIND: Record<string, DecoratorMetadata["kind"]> = {
   NgModule: "ngmodule",
 };
 
+/** No son decoradores — se detectan por nombre de método (como Angular real: se implementan por convención). Ver `LifecycleWiring`. */
+const LIFECYCLE_HOOK_NAMES = new Set([
+  "ngOnChanges",
+  "ngOnInit",
+  "ngDoCheck",
+  "ngAfterContentInit",
+  "ngAfterContentChecked",
+  "ngAfterViewInit",
+  "ngAfterViewChecked",
+  "ngOnDestroy",
+]);
+
 /**
  * Fase 1 del pipeline de compilación: parsea (vía `@swc/core`), GUARDA en
  * `MetadataStore`, y SACA del código cada decorador que ya leyó
@@ -367,7 +379,7 @@ export class DecoratorReader {
   }
 
   private static readBindings(members: ClassMember[], stripSpans: Span[], owner: string): ClassBindings {
-    const bindings: ClassBindings = { inputs: [], outputs: [], hostBindings: [], hostListeners: [] };
+    const bindings: ClassBindings = { inputs: [], outputs: [], hostBindings: [], hostListeners: [], lifecycleHooks: [] };
 
     for (const member of members) {
       if (member.type === "ClassProperty") {
@@ -388,6 +400,8 @@ export class DecoratorReader {
       if (member.type === "ClassMethod") {
         const name = DecoratorReader.propName(member.key);
         if (!name) continue;
+
+        if (LIFECYCLE_HOOK_NAMES.has(name)) bindings.lifecycleHooks.push(name);
 
         for (const decorator of member.function.decorators ?? []) {
           if (DecoratorReader.decoratorCallName(decorator) !== "HostListener") continue;

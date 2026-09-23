@@ -3,6 +3,7 @@ import type { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { ComponentBindings } from "@/compiler/component-bindings.ts";
 import { HashId } from "@/compiler/hash-id.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { ScopedInjectorRuntime } from "@/compiler/scoped-injector-runtime.ts";
 import { SelectorParser } from "@/compiler/selector-parser.ts";
 import type {
   ComponentMetadata,
@@ -37,16 +38,26 @@ export class ModuleWriter {
     const modules = MetadataStore.get(path).filter((metadata) => metadata.kind === "ngmodule");
     if (!modules.length) return undefined;
 
+    // Se estampa una sola vez, en el archivo del módulo raíz (el que tiene `bootstrap`) — y solo si algún
+    // component/directive del proyecto declaró `providers` propios (si no, no hay nada que resolver distinto
+    // de lo nativo). Ver `ScopedInjectorRuntime`.
+    const needsScopedInjector = this.scanner.hasScopedProviders();
+    let scopedInjectorEmitted = false;
+
     const statements = modules.map((metadata) => {
       const node = this.scanner.get(metadata.className);
       if (!node) throw new Error(`ModuleWriter: "${metadata.className}" no está en el escaneo del proyecto (¿corrió ApplicationScanner.scan()?).`);
-      return ModuleWriter.moduleStatement(node);
+      const isRoot = (metadata as NgModuleMetadata).bootstrap.length > 0;
+      const attachScopedInjector = isRoot && needsScopedInjector;
+      scopedInjectorEmitted ||= attachScopedInjector;
+      return ModuleWriter.moduleStatement(node, attachScopedInjector);
     });
 
-    return `import ${ANGULAR} from "angular";\n${code}\n${statements.join("\n")}\n`;
+    const prelude = scopedInjectorEmitted ? `${ScopedInjectorRuntime.source()}\n` : "";
+    return `import ${ANGULAR} from "angular";\n${prelude}${code}\n${statements.join("\n")}\n`;
   }
 
-  private static moduleStatement(node: ApplicationNode): string {
+  private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean): string {
     const id = ModuleWriter.idFor(node);
     // `@NgModule` propios por REFERENCIA (`X.ɵmod.id`), no por el string del id: así el `import { X }` sigue en
     // uso y ese archivo se evalúa antes (si no, SWC lo elimina y su `angular.module` nunca se registra).
@@ -55,6 +66,7 @@ export class ModuleWriter {
 
     const calls = [
       ...ModuleWriter.providerCalls(node),
+      ...(attachScopedInjector ? [ScopedInjectorRuntime.decoratorFragment()] : []),
       ...node.declarations.components.map(ModuleWriter.componentCall),
       ...node.declarations.directives.map(ModuleWriter.directiveCall),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),

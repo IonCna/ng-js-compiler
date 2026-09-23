@@ -53,6 +53,12 @@ export interface BindingsMetadata {
   hostListeners: { methodName: string; eventName: string; args: string[] }[];
   /** Solo se lee — todavía no se emite nada con ellos (providers a nivel componente es un ítem aparte). */
   providers: ProviderMetadata[];
+  /**
+   * Nombres de método de ciclo de vida de Angular real presentes en la clase (`ngOnInit`, `ngOnChanges`,
+   * `ngDoCheck`, `ngAfterContentInit`, `ngAfterViewInit`, `ngAfterContentChecked`, `ngAfterViewChecked`,
+   * `ngOnDestroy`) — no son decoradores, se detectan por nombre de método. Ver `LifecycleWiring`.
+   */
+  lifecycleHooks: string[];
 }
 
 export interface ComponentMetadata extends BaseMetadata, BindingsMetadata {

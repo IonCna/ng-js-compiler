@@ -306,6 +306,153 @@ export class AppModule {}
     expect(controller.clicks).toBe(1);
   });
 
+  it("providers de @Component: injector jerárquico por elemento — aísla instancias entre hermanos y las comparte con sus descendientes", async () => {
+    await write(
+      "logger.ts",
+      `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Logger {
+  static count = 0;
+  id: number;
+  constructor() { this.id = ++Logger.count; }
+}
+`,
+    );
+    await write(
+      "widget-child.component.ts",
+      `import { Component } from "ngjs-core";
+import { Logger } from "./logger";
+
+@Component({ selector: "app-widget-child", template: "<span class=\\"child-id\\">{{ $ctrl.logger.id }}</span>" })
+export class WidgetChildComponent {
+  constructor(readonly logger: Logger) {}
+}
+`,
+    );
+    await write(
+      "widget.component.ts",
+      `import { Component } from "ngjs-core";
+import { Logger } from "./logger";
+
+@Component({
+  selector: "app-widget",
+  template: "<span class=\\"own-id\\">{{ $ctrl.logger.id }}</span><app-widget-child></app-widget-child>",
+  providers: [Logger],
+})
+export class WidgetComponent {
+  constructor(readonly logger: Logger) {}
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { WidgetChildComponent } from "./widget-child.component";
+import { WidgetComponent } from "./widget.component";
+
+@NgModule({ declarations: [WidgetComponent, WidgetChildComponent], imports: [], bootstrap: [WidgetComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    // Nunca se registra `Logger` en ningún lado global (ni providedIn: "root", ni providers de @NgModule) —
+    // si el injector jerárquico no aislara de verdad, esto ni siquiera arrancaría ($injector no lo conoce).
+    const { dom } = await bootstrap(`<app-widget></app-widget><app-widget></app-widget>`);
+
+    const widgets = dom.window.document.querySelectorAll("app-widget");
+    expect(widgets).toHaveLength(2);
+
+    const ownId = (widget: Element) => widget.querySelector(".own-id")!.textContent;
+    const childId = (widget: Element) => widget.querySelector(".child-id")!.textContent;
+
+    // Aislamiento: cada <app-widget> tiene su PROPIA instancia de Logger, no una compartida globalmente.
+    expect(ownId(widgets[0]!)).not.toBe(ownId(widgets[1]!));
+    // Herencia: el hijo anidado (sin providers propios) recibe la MISMA instancia que su padre, no otra.
+    expect(childId(widgets[0]!)).toBe(ownId(widgets[0]!));
+    expect(childId(widgets[1]!)).toBe(ownId(widgets[1]!));
+  });
+
+  it("lifecycle hooks: $onChanges/$onInit/$doCheck/$postLink/$onDestroy reales, content/view (init y checked) en el orden correcto", async () => {
+    await write(
+      "card.component.ts",
+      `import { Component, Input } from "ngjs-core";
+
+@Component({ selector: "app-card", template: "" })
+export class CardComponent {
+  @Input() label!: string;
+  calls: string[] = [];
+
+  ngOnChanges(changes: any): void { this.calls.push("onChanges:" + JSON.stringify({ ...changes.label, isFirstChange: changes.label.isFirstChange() })); }
+  ngOnInit(): void { this.calls.push("onInit"); }
+  ngDoCheck(): void { this.calls.push("doCheck"); }
+  ngAfterContentInit(): void { this.calls.push("afterContentInit"); }
+  ngAfterViewInit(): void { this.calls.push("afterViewInit"); }
+  ngAfterContentChecked(): void { this.calls.push("afterContentChecked"); }
+  ngAfterViewChecked(): void { this.calls.push("afterViewChecked"); }
+  ngOnDestroy(): void { this.calls.push("onDestroy"); }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+
+@NgModule({ declarations: [CardComponent], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap(`<app-card label="theLabel"></app-card>`);
+    const card = dom.window.document.querySelector("app-card")!;
+    const controller = angular.element(card).controller("appCard") as { calls: string[] };
+    const $rootScope = injector.get<{ $digest(): void; $destroy(): void; theLabel?: string }>("$rootScope");
+
+    /** `$doCheck` puede correr más de una vez en un mismo digest (una vez por pasada interna) — cada
+     * ocurrencia va seguida, sincrónico, de "afterContentChecked" y "afterViewChecked" en ese orden. */
+    function assertDoCheckGroups(calls: string[]): void {
+      const doCheckIndexes = calls.reduce<number[]>((acc, call, i) => (call === "doCheck" ? [...acc, i] : acc), []);
+      expect(doCheckIndexes.length).toBeGreaterThan(0);
+      for (const i of doCheckIndexes) {
+        expect(calls[i + 1]).toBe("afterContentChecked");
+        expect(calls[i + 2]).toBe("afterViewChecked");
+      }
+    }
+
+    // onChanges y onInit corren una sola vez, antes que el primer doCheck. `previousValue: {}` es lo que
+    // AngularJS 1.8.3 manda de verdad en el primer cambio (no `undefined`) — se pasa tal cual viene, sin
+    // inventar un valor "más Angular real", `firstChange`/`isFirstChange` sí son el adaptador de LifecycleWiring.
+    expect(controller.calls[0]).toBe(
+      `onChanges:${JSON.stringify({ previousValue: {}, currentValue: undefined, firstChange: true, isFirstChange: true })}`,
+    );
+    expect(controller.calls[1]).toBe("onInit");
+    expect(controller.calls.indexOf("doCheck")).toBe(2);
+    assertDoCheckGroups(controller.calls);
+    // $postLink: content antes que view, una sola vez (a diferencia de doCheck, no depende de pasadas del digest).
+    expect(controller.calls.filter((c) => c === "afterContentInit" || c === "afterViewInit")).toEqual(["afterContentInit", "afterViewInit"]);
+
+    controller.calls.length = 0;
+    $rootScope.theLabel = "Ana";
+    $rootScope.$digest();
+
+    // Segundo digest con un cambio real: firstChange en false, previousValue/currentValue correctos. El orden
+    // relativo entre $onChanges y $doCheck solo está garantizado en el digest inicial, no acá — se busca en
+    // vez de asumir posición.
+    expect(controller.calls).toContain(
+      `onChanges:${JSON.stringify({ previousValue: undefined, currentValue: "Ana", firstChange: false, isFirstChange: false })}`,
+    );
+    assertDoCheckGroups(controller.calls);
+    expect(controller.calls).not.toContain("onInit"); // $onInit no se repite.
+    expect(controller.calls).not.toContain("afterContentInit"); // $postLink tampoco.
+
+    controller.calls.length = 0;
+    $rootScope.$destroy();
+    expect(controller.calls).toEqual(["onDestroy"]);
+  });
+
   it("platformBrowserDynamic().bootstrapModule(): función real, módulo raíz con providedIn root, providers del módulo pisan al root, monta <app-root>", async () => {
     await write(
       "logger.ts",

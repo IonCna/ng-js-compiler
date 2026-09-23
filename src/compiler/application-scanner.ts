@@ -43,6 +43,14 @@ export class ApplicationScanner {
     return this.nodes.get(className);
   }
 
+  /** Gate de todo el proyecto para `ScopedInjectorRuntime`: si nadie declara `providers` propios, no se estampa nada. */
+  hasScopedProviders(): boolean {
+    for (const node of this.nodes.values()) {
+      if ((node.metadata.kind === "component" || node.metadata.kind === "directive") && node.metadata.providers.length > 0) return true;
+    }
+    return false;
+  }
+
   /** Pasada 2 — ya existen TODOS los nodos, así que resolver nombre → nodo no depende del orden de la pasada 1. */
   private resolve(): void {
     for (const node of this.nodes.values()) {

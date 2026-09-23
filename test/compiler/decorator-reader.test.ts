@@ -141,6 +141,47 @@ describe("decoratorReaderTransform", () => {
     expect(metadata.hostListeners).toEqual([{ methodName: "onClick", eventName: "click", args: ["$event"] }]);
   });
 
+  it("detecta métodos de lifecycle por nombre (sin decorador) y NO los toca en el código", async () => {
+    const code = `
+      @Component({ selector: "app-card" })
+      export class CardComponent {
+        ngOnChanges(changes: unknown) {}
+        ngOnInit() {}
+        ngDoCheck() {}
+        ngAfterContentInit() {}
+        ngAfterViewInit() {}
+        ngOnDestroy() {}
+        notALifecycleHook() {}
+      }
+    `;
+
+    const result = await decoratorReaderTransform.transform(code, "card.ts");
+    // Ninguno se saca del código — a diferencia de los decoradores, son métodos comunes.
+    expect(result).toContain("ngOnChanges(changes: unknown) {}");
+    expect(result).toContain("ngOnInit() {}");
+    expect(result).toContain("ngDoCheck() {}");
+    expect(result).toContain("ngAfterContentInit() {}");
+    expect(result).toContain("ngAfterViewInit() {}");
+    expect(result).toContain("ngOnDestroy() {}");
+
+    const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
+    expect(metadata.lifecycleHooks).toEqual([
+      "ngOnChanges",
+      "ngOnInit",
+      "ngDoCheck",
+      "ngAfterContentInit",
+      "ngAfterViewInit",
+      "ngOnDestroy",
+    ]);
+  });
+
+  it("sin ningún método de lifecycle, lifecycleHooks queda vacío", async () => {
+    await decoratorReaderTransform.transform(`@Component({ selector: "app-card" }) export class CardComponent {}`, "card.ts");
+    const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
+
+    expect(metadata.lifecycleHooks).toEqual([]);
+  });
+
   it("lee providers de @Component/@Directive (clase suelta, token por su import)", async () => {
     const code = `
       import { OtherService } from "some-lib";

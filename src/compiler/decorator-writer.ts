@@ -1,6 +1,8 @@
 import { HostWiring } from "@/compiler/host-wiring.ts";
+import { LifecycleWiring } from "@/compiler/lifecycle-wiring.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { PlatformCode } from "@/compiler/platform-code.ts";
+import { ScopedProviders } from "@/compiler/scoped-providers.ts";
 import type {
   ComponentMetadata,
   DecoratorMetadata,
@@ -58,28 +60,34 @@ export class DecoratorWriter {
         statements.push(DecoratorWriter.provStatement(metadata));
     }
 
+    if (metadata.kind === "component" || metadata.kind === "directive") {
+      if (ScopedProviders.hasAny(metadata.providers)) statements.push(ScopedProviders.statement(metadata.className, metadata.providers));
+      if (LifecycleWiring.hasAny(metadata.lifecycleHooks)) {
+        statements.push(...LifecycleWiring.statements(metadata.className, metadata.lifecycleHooks, metadata.inputs));
+      }
+    }
+
     return statements;
   }
 
   /**
-   * `a0, a1, ...` en vez de los nombres originales del constructor — el factory solo los pasa en
-   * orden. Con `@HostBinding`/`@HostListener` el factory pasa a necesitar `$element`/`$scope`
-   * (`HostWiring.FACTORY_DEPS`) además de las deps del constructor, y envuelve la instancia en vez
-   * de devolverla directo — sin ninguno de los dos, el factory queda igual que siempre.
+   * `a0, a1, ...` en vez de los nombres originales del constructor — el factory solo los pasa en orden.
+   * `@Component`/`@Directive` SIEMPRE agregan `$element`/`$scope` (`HostWiring.FACTORY_DEPS`) y envuelven la
+   * instancia, tengan o no `@HostBinding`/`@HostListener` — gratis (`$compile` ya los arma en `locals` para
+   * cualquier controller, se pidan o no), así que no hace falta detectar nada de antemano para tenerlos
+   * disponibles. `@Injectable`/`@Pipe` no son controllers de AngularJS — quedan con el factory de siempre.
    */
   private static facStatement(metadata: WritableMetadata): string {
     const { className, constructorTokens } = metadata;
     const ctorParams = constructorTokens.map((_, index) => `a${index}`).join(", ");
     const deps = constructorTokens.map((token) => JSON.stringify(token));
 
-    const bindings = metadata.kind === "component" || metadata.kind === "directive" ? metadata : undefined;
-    const wiring = bindings && HostWiring.hasAny(bindings) ? HostWiring.statements(bindings, className) : [];
-
-    if (!wiring.length) {
+    if (metadata.kind !== "component" && metadata.kind !== "directive") {
       const factory = `function ${className}_Factory(${ctorParams}) { return new ${className}(${ctorParams}); }`;
       return `${className}.ɵfac = [${[...deps, factory].join(", ")}];`;
     }
 
+    const wiring = HostWiring.hasAny(metadata) ? HostWiring.statements(metadata, className) : [];
     const factoryParams = [ctorParams, ...HostWiring.FACTORY_DEPS].filter((param) => param.length > 0).join(", ");
     const body = [`var instance = new ${className}(${ctorParams});`, ...wiring, "return instance;"].join(" ");
     const allDeps = [...deps, ...HostWiring.FACTORY_DEPS.map((dep) => JSON.stringify(dep))];

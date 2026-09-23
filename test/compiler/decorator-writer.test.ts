@@ -20,6 +20,7 @@ function component(overrides: Partial<ComponentMetadata> = {}): ComponentMetadat
     hostBindings: [],
     hostListeners: [],
     providers: [],
+    lifecycleHooks: [],
     ...overrides,
   };
 }
@@ -33,16 +34,23 @@ describe("DecoratorWriter", () => {
     expect(DecoratorWriter.write("class Foo {}", "foo.ts")).toBeUndefined();
   });
 
-  it("ɵfac: factory con anotación en array — nombres de DI como strings y el factory al final", () => {
+  it("ɵfac: factory con anotación en array — nombres de DI como strings, $element/$scope siempre al final antes del factory", () => {
     MetadataStore.set("card.ts", [component({ constructorTokens: ["UserService_1a2b3c4d", "$http"] })]);
 
     const output = DecoratorWriter.write("class CardComponent { constructor(u, h) { this.u = u; this.h = h; } }", "card.ts")!;
 
     expect(output).toContain(
-      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "$http", function CardComponent_Factory(a0, a1) { return new CardComponent(a0, a1); }];',
+      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "$http", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { var instance = new CardComponent(a0, a1); return instance; }];',
     );
-    const fac = evaluate(output, "CardComponent").ɵfac as [string, string, (a: unknown, b: unknown) => { u: unknown; h: unknown }];
-    expect(fac[2]("u", "h")).toMatchObject({ u: "u", h: "h" });
+    const fac = evaluate(output, "CardComponent").ɵfac as [
+      string,
+      string,
+      string,
+      string,
+      (a: unknown, b: unknown, element: unknown, scope: unknown) => { u: unknown; h: unknown },
+    ];
+    const instance = fac[4]("u", "h", {}, "the-scope");
+    expect(instance).toMatchObject({ u: "u", h: "h" });
   });
 
   it("un import de efecto por cada archivo del que viene una dependencia del constructor (que se evalúe aunque solo se use como tipo)", () => {
@@ -53,12 +61,25 @@ describe("DecoratorWriter", () => {
     expect(output).toContain('import "./user.service";');
   });
 
-  it("ɵfac sin constructor: solo el factory", () => {
+  it("ɵfac sin constructor: igual agrega $element/$scope (@Component/@Directive siempre los llevan)", () => {
     MetadataStore.set("card.ts", [component()]);
 
     const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
 
-    expect(output).toContain("CardComponent.ɵfac = [function CardComponent_Factory() { return new CardComponent(); }];");
+    expect(output).toContain(
+      'CardComponent.ɵfac = ["$element", "$scope", function CardComponent_Factory($element, $scope) { var instance = new CardComponent(); return instance; }];',
+    );
+  });
+
+  it("ɵfac de @Injectable/@Pipe: sin $element/$scope — no son controllers de AngularJS", () => {
+    MetadataStore.set("pipes.ts", [
+      { kind: "pipe", className: "UpperPipe", options: { name: "upper" }, constructorTokens: [], constructorImports: [] },
+    ]);
+
+    const output = DecoratorWriter.write("class UpperPipe {}", "pipes.ts")!;
+
+    expect(output).toContain("UpperPipe.ɵfac = [function UpperPipe_Factory() { return new UpperPipe(); }];");
+    expect(output).not.toContain("$element");
   });
 
   it("ɵcmp con la forma de Ivy: selectors en arrays, inputs/outputs nombre público → propiedad, exportAs como array", () => {
@@ -75,14 +96,16 @@ describe("DecoratorWriter", () => {
       }),
     ]);
 
-    const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
+    const output = DecoratorWriter.write("class SomeService {}\nclass CardComponent {}", "card.ts")!;
+    const CardComponent = evaluate(output, "CardComponent") as { ɵcmp: unknown; ɵfac: { ɵproviders?: unknown } };
 
-    expect(evaluate(output, "CardComponent").ɵcmp).toEqual({
+    expect(CardComponent.ɵcmp).toEqual({
       selectors: [["app-card"]],
       inputs: { title: "title", aka: "alias" },
       outputs: { closed: "closed" },
       exportAs: ["card"],
     });
+    expect(CardComponent.ɵfac.ɵproviders).toEqual([{ token: "SomeService_1a2b3c4d", kind: "class", ctor: expect.any(Function) }]);
     expect(output).not.toContain("$name");
     expect(output).not.toContain("$inject");
   });
@@ -145,15 +168,6 @@ describe("DecoratorWriter", () => {
 
     expect(output).toContain('UpperPipe.ɵpipe = { name: "upper", pure: true };');
     expect(output).toContain('NowPipe.ɵpipe = { name: "now", pure: false };');
-  });
-
-  it("sin @HostBinding/@HostListener, el factory no agrega $element/$scope", () => {
-    MetadataStore.set("card.ts", [component()]);
-
-    const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
-
-    expect(output).not.toContain("$element");
-    expect(output).not.toContain("$scope");
   });
 
   it("con @HostBinding/@HostListener: el factory agrega $element/$scope, aplica el binding vía $watch, llama al listener dentro de $apply y limpia todo en $destroy", () => {

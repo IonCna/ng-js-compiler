@@ -229,6 +229,137 @@ export class AppComponent {}
     });
   });
 
+  describe("scoped injector runtime (providers de @Component/@Directive)", () => {
+    it("se estampa una sola vez, en el módulo raíz, solo si algún component/directive del proyecto tiene providers propios", async () => {
+      const modulePath = join(dir, "app.module.ts");
+      await write(
+        modulePath,
+        `import { NgModule } from "ngjs-core";
+import { AppComponent } from "./app.component.ts";
+import { UserService } from "./user.service.ts";
+
+@NgModule({ declarations: [AppComponent], imports: [], providers: [UserService], bootstrap: [AppComponent] })
+export class AppModule {}
+`,
+      );
+      await write(
+        join(dir, "app.component.ts"),
+        `import { Component } from "ngjs-core";
+import { UserService } from "./user.service.ts";
+
+@Component({ selector: "app-root", template: "", providers: [UserService] })
+export class AppComponent {}
+`,
+      );
+      await write(
+        join(dir, "user.service.ts"),
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class UserService {}
+`,
+      );
+
+      const scanner = new ApplicationScanner();
+      await scanner.scan(dir);
+      const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+      expect(output).toContain("function ɵElementInjectorNode(providers, parent, $injector)");
+      expect(output).toContain('.decorator("$controller", ["$delegate", "$injector", ɵscopedController])');
+      // Antes de la cadena del módulo, que ya usa `ɵscopedController` (aunque los declarations hoisteen igual, textualmente va primero).
+      expect(output.indexOf("function ɵscopedController")).toBeLessThan(output.indexOf("ɵangular.module("));
+    });
+
+    it("sin ningún provider propio en el proyecto, no estampa nada del injector jerárquico", async () => {
+      const modulePath = join(dir, "app.module.ts");
+      await write(
+        modulePath,
+        `import { NgModule } from "ngjs-core";
+import { AppComponent } from "./app.component.ts";
+
+@NgModule({ declarations: [AppComponent], imports: [], bootstrap: [AppComponent] })
+export class AppModule {}
+`,
+      );
+      await write(
+        join(dir, "app.component.ts"),
+        `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-root", template: "" })
+export class AppComponent {}
+`,
+      );
+
+      const scanner = new ApplicationScanner();
+      await scanner.scan(dir);
+      const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+      expect(output).not.toContain("ɵElementInjectorNode");
+      expect(output).not.toContain("ɵscopedController");
+      expect(output).not.toContain(".decorator(");
+    });
+
+    it("un módulo sin bootstrap (no es el raíz) no recibe el .decorator, aunque haya providers en otro lado del proyecto", async () => {
+      const appModulePath = join(dir, "app.module.ts");
+      const featureModulePath = join(dir, "feature.module.ts");
+      await write(
+        appModulePath,
+        `import { NgModule } from "ngjs-core";
+import { AppComponent } from "./app.component.ts";
+import { FeatureModule } from "./feature.module.ts";
+
+@NgModule({ declarations: [AppComponent], imports: [FeatureModule], bootstrap: [AppComponent] })
+export class AppModule {}
+`,
+      );
+      await write(
+        join(dir, "app.component.ts"),
+        `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-root", template: "" })
+export class AppComponent {}
+`,
+      );
+      await write(
+        featureModulePath,
+        `import { NgModule } from "ngjs-core";
+import { WidgetComponent } from "./widget.component.ts";
+import { UserService } from "./user.service.ts";
+
+@NgModule({ declarations: [WidgetComponent], imports: [] })
+export class FeatureModule {}
+`,
+      );
+      await write(
+        join(dir, "widget.component.ts"),
+        `import { Component } from "ngjs-core";
+import { UserService } from "./user.service.ts";
+
+@Component({ selector: "app-widget", template: "", providers: [UserService] })
+export class WidgetComponent {}
+`,
+      );
+      await write(
+        join(dir, "user.service.ts"),
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class UserService {}
+`,
+      );
+
+      const scanner = new ApplicationScanner();
+      await scanner.scan(dir);
+      const writer = new ModuleWriter(scanner);
+
+      const featureOutput = writer.write("export class FeatureModule {}", featureModulePath)!;
+      const appOutput = writer.write("export class AppModule {}", appModulePath)!;
+
+      expect(featureOutput).not.toContain(".decorator(");
+      expect(appOutput).toContain(".decorator(");
+    });
+  });
+
   async function moduleWithProviders(providers: string): Promise<() => string> {
     const modulePath = join(dir, "app.module.ts");
     await write(
