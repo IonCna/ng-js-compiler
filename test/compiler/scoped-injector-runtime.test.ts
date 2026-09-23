@@ -10,7 +10,7 @@ interface ElementInjectorNode {
 
 /** Evalúa `source()` y devuelve `ɵElementInjectorNode`/`ɵscopedController` para manejarlos a mano. */
 function evaluate(): {
-  Node: new (providers: unknown[], parent: unknown, $injector: unknown) => ElementInjectorNode;
+  Node: new (providers: unknown[], parent: unknown, $injector: unknown, element?: unknown, boundary?: unknown) => ElementInjectorNode;
   scopedController: ($delegate: ControllerDelegate, $injector: unknown) => ControllerDelegate;
 } {
   // eslint-disable-next-line no-new-func
@@ -107,6 +107,49 @@ describe("ScopedInjectorRuntime", () => {
       expect(child.resolve("Foo")).toBe("from-parent");
       expect(child.resolve("$http")).toBe("native-http");
       expect($injector.get).toHaveBeenCalledWith("$http");
+    });
+
+    it("ɵresolve con optional: resuelve por la cadena (nodo → padre → $injector) y da null si nadie lo provee", () => {
+      const { Node } = evaluate();
+      const $injector = { has: (name: string) => name === "$http", get: (name: string) => (name === "$http" ? "native-http" : undefined) };
+      const parent = new Node([{ token: "Foo", kind: "useValue", value: "from-parent" }], undefined, $injector);
+      const child = new Node([], parent, $injector);
+
+      const resolve = child.resolve("ɵresolve") as (token: string, flags: Record<string, boolean>) => unknown;
+      const optional = (token: string) => resolve(token, { optional: true });
+      expect(optional("Foo")).toBe("from-parent");
+      expect(optional("$http")).toBe("native-http");
+      expect(optional("Missing")).toBeNull();
+    });
+
+    it("ɵresolve con self/skipSelf: la semántica de ElementInjectorNode de ngjs-core", () => {
+      const { Node } = evaluate();
+      const $injector = { has: (name: string) => name === "App", get: (name: string) => (name === "App" ? "from-app" : undefined) };
+      const parent = new Node([{ token: "Theme", kind: "useValue", value: "parent-theme" }], undefined, $injector);
+      const child = new Node([{ token: "Theme", kind: "useValue", value: "child-theme" }], parent, $injector);
+      const resolve = child.resolve("ɵresolve") as (token: string, flags: Record<string, boolean>) => unknown;
+
+      expect(resolve("Theme", { self: true })).toBe("child-theme");
+      expect(resolve("Theme", { skipSelf: true })).toBe("parent-theme");
+      expect(() => resolve("App", { self: true })).toThrow(/con \{ self: true \}/);
+      expect(resolve("App", { self: true, optional: true })).toBeNull();
+    });
+
+    it("ɵresolve con host (como Angular): sube por los nodos dentro del elemento host y no consulta la app", () => {
+      const { Node } = evaluate();
+      const $injector = { has: (name: string) => name === "App", get: (name: string) => (name === "App" ? "from-app" : undefined) };
+      // outer (fuera del host) > host (el componente dueño de la vista) > inner (una directiva adentro)
+      const outerEl = { contains: () => false };
+      const innerEl = {};
+      const hostEl = { contains: (el: unknown) => el === innerEl };
+      const outer = new Node([{ token: "Theme", kind: "useValue", value: "outer-theme" }, { token: "Outer", kind: "useValue", value: "outer" }], undefined, $injector, outerEl);
+      const host = new Node([{ token: "Theme", kind: "useValue", value: "host-theme" }], outer, $injector, hostEl);
+      const inner = new Node([], host, $injector, innerEl, hostEl);
+      const resolve = inner.resolve("ɵresolve") as (token: string, flags: Record<string, boolean>) => unknown;
+
+      expect(resolve("Theme", { host: true })).toBe("host-theme");
+      expect(resolve("Outer", { host: true, optional: true })).toBeNull();
+      expect(() => resolve("App", { host: true })).toThrow(/con \{ host: true \}/);
     });
 
     it("destroy(): limpia la caché", () => {

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ApplicationScanner } from "@/compiler/application-scanner.ts";
+import { HashId } from "@/compiler/hash-id.ts";
 import { ModuleWriter } from "@/compiler/module-writer.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
@@ -348,7 +349,7 @@ export class UserService {}
       await scanner.scan(dir);
       const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
 
-      expect(output).toContain("function ɵElementInjectorNode(providers, parent, $injector)");
+      expect(output).toContain("function ɵElementInjectorNode(providers, parent, $injector, element, boundary)");
       expect(output).toContain('.decorator("$controller", ["$delegate", "$injector", ɵscopedController])');
       // Antes de la cadena del módulo, que ya usa `ɵscopedController` (aunque los declarations hoisteen igual, textualmente va primero).
       expect(output.indexOf("function ɵscopedController")).toBeLessThan(output.indexOf("ɵangular.module("));
@@ -464,6 +465,53 @@ export class AppModule {}
 
     expect(output).toContain('.value("api", "b")');
     expect(output).not.toContain('.value("api", "a")');
+  });
+
+  describe("imports con llamada (ModuleWithProviders)", () => {
+    it("evalúa cada llamada una vez, la usa en requires y registra sus providers antes que los propios", async () => {
+      const modulePath = join(dir, "app.module.ts");
+      await write(
+        modulePath,
+        `import { NgModule } from "ngjs-core";
+import { ConfigModule } from "ext-config";
+import { options } from "./options";
+
+@NgModule({ declarations: [], imports: [ConfigModule.forRoot(options)], providers: [{ provide: "api", useValue: "a" }] })
+export class AppModule {}
+`,
+      );
+      const scanner = new ApplicationScanner();
+      await scanner.scan(dir);
+      const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+      expect(output).toContain("function ɵimportProviders(");
+      expect(output).toContain("const ɵAppModule_import0 = ConfigModule.forRoot(options);");
+      expect(output).toMatch(/ɵimportProviders\(ɵangular\.module\("[^"]+", \[ɵimportedModuleName\(ɵAppModule_import0\)\]\), \[ɵAppModule_import0\]\)\n {2}\.value\("api", "a"\)/);
+    });
+
+    it("sin llamadas en imports no estampa el runtime", async () => {
+      const output = (await moduleWithProviders("[]"))();
+
+      expect(output).not.toContain("ɵimportProviders");
+    });
+  });
+
+  it("providers multi: cada aporte con nombre único por módulo y un .config que lo junta con el resto de la app", async () => {
+    const output = (await moduleWithProviders(`[{ provide: "hooks", useValue: "a", multi: true }, { provide: "hooks", useValue: "b", multi: true }]`))();
+    const id = HashId.readable("AppModule", join(dir, "app.module.ts"));
+    const members = [`hooks#multi#${id}#0`, `hooks#multi#${id}#1`];
+
+    expect(output).toContain("function ɵmultiProviders(");
+    expect(output).toContain(`.value(${JSON.stringify(members[0])}, "a")`);
+    expect(output).toContain(`.value(${JSON.stringify(members[1])}, "b")`);
+    expect(output).toContain(`.config(ɵmultiConfig("hooks", ${JSON.stringify(members)}))`);
+    expect(output).not.toContain('.factory("hooks"');
+  });
+
+  it("sin providers multi ni llamadas en imports no estampa el runtime de multi", async () => {
+    const output = (await moduleWithProviders(`[{ provide: "api", useValue: "a" }]`))();
+
+    expect(output).not.toContain("ɵmultiProviders");
   });
 
   it("providers: mezclar multi y no-multi para el mismo token es error", async () => {

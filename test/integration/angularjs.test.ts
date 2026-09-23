@@ -258,6 +258,662 @@ export class AppModule {}
     expect(injector.get("ext")).toBe("from lib");
   });
 
+  it("imports con llamada: ModuleWithProviders importa ngModule y registra sus providers (los propios ganan); otra llamada es un módulo más", async () => {
+    // Paquete ya compilado con ngjs: `forRoot()` devuelve `{ ngModule, providers }`, como en Angular.
+    await mkdir(join(dir, "node_modules", "ext-config"), { recursive: true });
+    await writeFile(join(dir, "node_modules", "ext-config", "package.json"), JSON.stringify({ name: "ext-config", main: "index.js" }), "utf8");
+    await writeFile(
+      join(dir, "node_modules", "ext-config", "index.js"),
+      `export class ConfigService {
+  constructor(entries) { this.entries = entries; }
+}
+ConfigService.ɵprov = { token: "ConfigService_ext" };
+ConfigService.ɵfac = ["entries", function (entries) { return new ConfigService(entries); }];
+
+export class ConfigModule {
+  static forRoot(entries) {
+    return {
+      ngModule: ConfigModule,
+      providers: [
+        ConfigService,
+        [{ provide: "entries", useValue: entries, multi: true }],
+        { provide: "entryCount", useFactory: (config) => config.entries[0].length, deps: [ConfigService] },
+        { provide: "api", useValue: "lib" },
+      ],
+    };
+  }
+}
+ConfigModule.ɵmod = { id: "ConfigModule_ext" };
+angular.module("ConfigModule_ext", []).value("configDeclarations", "registered");
+
+export function legacyFeature() {
+  return angular.module("legacy.feature", []).value("legacyFeature", "on");
+}
+`,
+      "utf8",
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { legacyFeature, ConfigModule } from "ext-config";
+
+const entries = [{ key: "a" }, { key: "b" }];
+
+@NgModule({ declarations: [], imports: [ConfigModule.forRoot(entries), legacyFeature()], providers: [{ provide: "api", useValue: "app" }] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { injector } = await bootstrap("");
+
+    expect(injector.get("configDeclarations")).toBe("registered");
+    expect(injector.get("entryCount")).toBe(2);
+    expect(injector.get<{ entries: unknown[] }>("ConfigService_ext").entries).toEqual([[{ key: "a" }, { key: "b" }]]);
+    expect(injector.get("api")).toBe("app");
+    expect(injector.get("legacyFeature")).toBe("on");
+  });
+
+  it("ModuleWithProviders con InjectionToken: el ɵprov estampado en la declaración coincide con el nombre que usa quien lo inyecta", async () => {
+    await write(
+      "tokens.ts",
+      `class InjectionToken<T> { constructor(readonly description: string) {} }
+export const API_URL = new InjectionToken<string>("api.url");
+`,
+    );
+    await write(
+      "api.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { API_URL } from "./tokens";
+
+@NgModule({ declarations: [], imports: [] })
+export class ApiModule {
+  static forRoot(url: string) {
+    return { ngModule: ApiModule, providers: [{ provide: API_URL, useValue: url }] };
+  }
+}
+`,
+    );
+    await write(
+      "api.service.ts",
+      `import { Inject, Injectable } from "ngjs-core";
+import { API_URL } from "./tokens";
+
+@Injectable()
+export class ApiService {
+  constructor(@Inject(API_URL) readonly url: string) {}
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { ApiModule } from "./api.module";
+import { ApiService } from "./api.service";
+
+@NgModule({ declarations: [], imports: [ApiModule.forRoot("https://api")], providers: [ApiService] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { injector } = await bootstrap("");
+
+    expect(injector.get<{ url: string }>(TokenName.of("ApiService", "test-app")).url).toBe("https://api");
+  });
+
+  it("@Optional(): sin provider llega null (no error); con provider, la instancia — también desde los providers de un @Component", async () => {
+    await write(
+      "services.ts",
+      `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Logger { name = "logger"; }
+
+@Injectable()
+export class Missing {}
+
+@Injectable()
+export class Theme { name = "theme"; }
+`,
+    );
+    await write(
+      "report.service.ts",
+      `import { Injectable, Optional } from "ngjs-core";
+import { Logger, Missing } from "./services";
+
+@Injectable()
+export class ReportService {
+  constructor(@Optional() readonly logger: Logger | null, @Optional() readonly missing: Missing | null) {}
+}
+`,
+    );
+    await write(
+      "card.component.ts",
+      `import { Component, Optional } from "ngjs-core";
+import { Theme } from "./services";
+
+@Component({ selector: "app-card", template: "", providers: [Theme] })
+export class CardComponent {
+  constructor(@Optional() readonly theme: Theme | null) {}
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+import { ReportService } from "./report.service";
+import { Logger } from "./services";
+
+@NgModule({ declarations: [CardComponent], imports: [], providers: [ReportService, Logger], bootstrap: [CardComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap("<app-card></app-card>");
+
+    const report = injector.get<{ logger: { name: string } | null; missing: unknown }>(TokenName.of("ReportService", "test-app"));
+    expect(report.logger?.name).toBe("logger");
+    expect(report.missing).toBeNull();
+    const card = angular.element(dom.window.document.querySelector("app-card")!).controller("appCard") as { theme: { name: string } | null };
+    expect(card.theme?.name).toBe("theme");
+  });
+
+  it("inject() durante la construcción: campos y constructor de un servicio y de un @Component (también desde sus providers), optional incluido", async () => {
+    await write(
+      "services.ts",
+      `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Logger { name = "logger"; }
+
+@Injectable()
+export class Missing {}
+
+@Injectable()
+export class Theme { name = "theme"; }
+`,
+    );
+    await write(
+      "report.service.ts",
+      `import { Injectable, inject } from "ngjs-core";
+import { Logger, Missing } from "./services";
+
+@Injectable()
+export class ReportService {
+  readonly logger = inject(Logger);
+  readonly missing = inject(Missing, { optional: true });
+  readonly label: string;
+  constructor() { this.label = "report:" + inject(Logger).name; }
+}
+`,
+    );
+    await write(
+      "card.component.ts",
+      `import { Component, inject } from "ngjs-core";
+import { ReportService } from "./report.service";
+import { Theme } from "./services";
+
+@Component({ selector: "app-card", template: "", providers: [Theme] })
+export class CardComponent {
+  readonly theme = inject(Theme);
+  readonly report = inject(ReportService);
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+import { ReportService } from "./report.service";
+import { Logger } from "./services";
+
+@NgModule({ declarations: [CardComponent], imports: [], providers: [ReportService, Logger], bootstrap: [CardComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap("<app-card></app-card>");
+
+    const report = injector.get<{ logger: { name: string }; missing: unknown; label: string }>(TokenName.of("ReportService", "test-app"));
+    expect(report.logger.name).toBe("logger");
+    expect(report.missing).toBeNull();
+    expect(report.label).toBe("report:logger");
+    const card = angular.element(dom.window.document.querySelector("app-card")!).controller("appCard") as { theme: { name: string }; report: unknown };
+    expect(card.theme.name).toBe("theme");
+    expect(card.report).toBe(report);
+  });
+
+  it("@Self/@SkipSelf/@Host en componentes anidados con providers propios (@Host corta en el componente dueño de la vista, sin caer a la app), y @Self sin injector de elemento", async () => {
+    await write(
+      "theme.ts",
+      `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Theme { constructor() {} name = ""; }
+
+@Injectable()
+export class AppOnly { name = "app"; }
+`,
+    );
+    await write(
+      "outer.component.ts",
+      `import { Component } from "ngjs-core";
+import { Theme } from "./theme";
+
+@Component({ selector: "app-outer", template: "<app-inner></app-inner><span app-probe></span>", providers: [{ provide: Theme, useValue: { name: "outer" } }] })
+export class OuterComponent {}
+`,
+    );
+    await write(
+      "inner.component.ts",
+      `import { Component, Host, Optional, Self, SkipSelf, inject } from "ngjs-core";
+import { Theme } from "./theme";
+
+@Component({ selector: "app-inner", template: "", providers: [{ provide: Theme, useValue: { name: "inner" } }] })
+export class InnerComponent {
+  readonly parent = inject(Theme, { skipSelf: true });
+  constructor(@Self() readonly own: Theme, @Host() readonly host: Theme) {}
+}
+`,
+    );
+    await write(
+      "probe.directive.ts",
+      `import { Directive, Host, Optional } from "ngjs-core";
+import { AppOnly, Theme } from "./theme";
+
+@Directive({ selector: "[appProbe]" })
+export class ProbeDirective {
+  constructor(@Host() readonly theme: Theme, @Host() @Optional() readonly appOnly: AppOnly | null) {}
+}
+`,
+    );
+    await write(
+      "plain.component.ts",
+      `import { Component, Optional, Self } from "ngjs-core";
+import { Theme } from "./theme";
+
+@Component({ selector: "app-plain", template: "" })
+export class PlainComponent {
+  constructor(@Self() @Optional() readonly theme: Theme | null) {}
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { InnerComponent } from "./inner.component";
+import { OuterComponent } from "./outer.component";
+import { PlainComponent } from "./plain.component";
+import { ProbeDirective } from "./probe.directive";
+import { AppOnly, Theme } from "./theme";
+
+@NgModule({ declarations: [OuterComponent, InnerComponent, PlainComponent, ProbeDirective], imports: [], providers: [Theme, AppOnly], bootstrap: [OuterComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular } = await bootstrap("<app-outer></app-outer><app-plain></app-plain>");
+
+    const inner = angular.element(dom.window.document.querySelector("app-inner")!).controller("appInner") as Record<string, { name: string }>;
+    expect(inner.own!.name).toBe("inner");
+    expect(inner.parent!.name).toBe("outer");
+    expect(inner.host!.name).toBe("inner");
+    // Directiva en la vista de `outer`: `@Host` llega hasta `outer` (su host) y no consulta la app — como Angular.
+    const probe = angular.element(dom.window.document.querySelector("[app-probe]")!).controller("appProbe") as { theme: { name: string }; appOnly: unknown };
+    expect(probe.theme.name).toBe("outer");
+    expect(probe.appOnly).toBeNull();
+    // Sin providers en ningún ancestro no hay injector de elemento: `@Self()` no encuentra nada propio (el `Theme` de la app no cuenta).
+    const plain = angular.element(dom.window.document.querySelector("app-plain")!).controller("appPlain") as { theme: unknown };
+    expect(plain.theme).toBeNull();
+  });
+
+  it("inyectar una directiva/componente: se lee del elemento (como require), con flags, @Host y por clase base", async () => {
+    await write(
+      "base-tabs.ts",
+      `import { Directive } from "ngjs-core";
+
+@Directive()
+export abstract class BaseTabs { kind = "tabs"; }
+`,
+    );
+    await write(
+      "tabs.component.ts",
+      `import { Component } from "ngjs-core";
+import { BaseTabs } from "./base-tabs";
+
+@Component({ selector: "app-tabs", template: "<app-tab></app-tab><span app-tab-label></span>" })
+export class TabsComponent extends BaseTabs { name = "tabs-1"; }
+`,
+    );
+    await write(
+      "other.component.ts",
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-other", template: "" })
+export class OtherComponent {}
+`,
+    );
+    await write(
+      "tab.component.ts",
+      `import { Component, Host, Optional, inject } from "ngjs-core";
+import { BaseTabs } from "./base-tabs";
+import { OtherComponent } from "./other.component";
+import { TabsComponent } from "./tabs.component";
+
+@Component({ selector: "app-tab", template: "" })
+export class TabComponent {
+  readonly base = inject(BaseTabs);
+  constructor(
+    readonly tabs: TabsComponent,
+    @Host() @Optional() readonly hostTabs: TabsComponent | null,
+    @Optional() readonly other: OtherComponent | null,
+  ) {}
+}
+`,
+    );
+    await write(
+      "tab-label.directive.ts",
+      `import { Directive, Host } from "ngjs-core";
+import { TabsComponent } from "./tabs.component";
+
+@Directive({ selector: "[appTabLabel]" })
+export class TabLabelDirective {
+  constructor(@Host() readonly tabs: TabsComponent) {}
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { OtherComponent } from "./other.component";
+import { TabComponent } from "./tab.component";
+import { TabLabelDirective } from "./tab-label.directive";
+import { TabsComponent } from "./tabs.component";
+
+@NgModule({ declarations: [TabsComponent, TabComponent, TabLabelDirective, OtherComponent], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular } = await bootstrap("<app-tabs></app-tabs>");
+
+    const tabs = angular.element(dom.window.document.querySelector("app-tabs")!).controller("appTabs");
+    const tab = angular.element(dom.window.document.querySelector("app-tab")!).controller("appTab") as Record<string, unknown>;
+    expect(tab.tabs).toBe(tabs);
+    expect(tab.base).toBe(tabs); // `inject(BaseTabs)`: la subclase en un ancestro también cuenta
+    expect(tab.hostTabs).toBeNull(); // un componente es su propio host: el padre queda afuera
+    expect(tab.other).toBeNull();
+    const label = angular.element(dom.window.document.querySelector("[app-tab-label]")!).controller("appTabLabel") as { tabs: unknown };
+    expect(label.tabs).toBe(tabs); // una directiva en la vista de `app-tabs`: su host es `app-tabs`
+  });
+
+  describe("herencia entre clases del proyecto", () => {
+    it("una subclase sin constructor usa el de la base; inject() de base y subclase (en archivos distintos); inputs, host y lifecycle heredados", async () => {
+      await write(
+        "services.ts",
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Logger { name = "logger"; }
+
+@Injectable()
+export class Config { name = "config"; }
+
+@Injectable()
+export class Theme { name = "theme"; }
+`,
+      );
+      await write(
+        "base.ts",
+        `import { Directive, HostBinding, Input, inject } from "ngjs-core";
+import { Config, Logger } from "./services";
+
+@Directive()
+export abstract class BaseCard {
+  @Input() label = "";
+  @HostBinding("class.card") readonly isCard = true;
+  readonly config = inject(Config);
+  calls: string[] = [];
+  constructor(readonly logger: Logger) {}
+  ngOnInit(): void { this.calls.push("init:" + this.label); }
+}
+`,
+      );
+      await write(
+        "card.component.ts",
+        `import { Component, Input, inject } from "ngjs-core";
+import { BaseCard } from "./base";
+import { Theme } from "./services";
+
+@Component({ selector: "app-card", template: "<span>{{ $ctrl.label }}/{{ $ctrl.size }}</span>" })
+export class CardComponent extends BaseCard {
+  @Input() size = "";
+  readonly theme = inject(Theme);
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+import { Config, Logger, Theme } from "./services";
+
+@NgModule({ declarations: [CardComponent], imports: [], providers: [Logger, Config, Theme] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      const { dom, angular } = await bootstrap(`<app-card label="'Hola'" size="'L'"></app-card>`);
+
+      const element = dom.window.document.querySelector("app-card")!;
+      const card = angular.element(element).controller("appCard") as Record<string, unknown> & { calls: string[] };
+      expect((card.logger as { name: string }).name).toBe("logger");
+      expect((card.config as { name: string }).name).toBe("config");
+      expect((card.theme as { name: string }).name).toBe("theme");
+      expect(element.textContent).toBe("Hola/L");
+      expect(card.calls).toEqual(["init:Hola"]);
+      expect(element.classList.contains("card")).toBe(true);
+    });
+
+    it("una subclase SIN decorador provista con DI heredada es error al registrar (Angular también pide @Injectable())", async () => {
+      await write(
+        "services.ts",
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Logger {}
+
+@Injectable()
+export class BaseService { constructor(readonly logger: Logger) {} }
+
+export class ChildService extends BaseService {}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { ChildService, Logger } from "./services";
+
+@NgModule({ declarations: [], imports: [], providers: [Logger, ChildService] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      await expect(bootstrap("")).rejects.toThrow(/"ChildService" hereda el factory de su clase padre — agregale @Injectable\(\)/);
+    });
+  });
+
+  describe("multi-providers entre módulos", () => {
+    async function hooksApp(featureHook: string): Promise<void> {
+      await write(
+        "tokens.ts",
+        `class InjectionToken<T> { constructor(readonly description: string) {} }
+export const HOOKS = new InjectionToken<string[]>("hooks");
+`,
+      );
+      await write(
+        "feature.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [], providers: [${featureHook}] })
+export class FeatureModule {}
+`,
+      );
+      await write(
+        "hooks.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [] })
+export class HooksModule {
+  static forRoot() {
+    return { ngModule: HooksModule, providers: [{ provide: HOOKS, useValue: "import", multi: true }] };
+  }
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { FeatureModule } from "./feature.module";
+import { HooksModule } from "./hooks.module";
+import { HOOKS } from "./tokens";
+
+@NgModule({
+  declarations: [],
+  imports: [FeatureModule, HooksModule.forRoot()],
+  providers: [{ provide: HOOKS, useValue: "own", multi: true }],
+})
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+    }
+
+    it("se juntan todos, en el orden de Angular: módulos importados → ModuleWithProviders → propios", async () => {
+      await hooksApp(`{ provide: HOOKS, useValue: "feature", multi: true }`);
+
+      const { injector } = await bootstrap("");
+
+      expect(injector.get(TokenName.of("HOOKS", "test-app"))).toEqual(["feature", "import", "own"]);
+    });
+
+    const multi = (value: string) => `{ provide: HOOKS, useValue: "${value}", multi: true }`;
+    const single = (value: string) => `{ provide: HOOKS, useValue: "${value}" }`;
+
+    /** Mezclar multi y no-multi es error en Angular sin importar el orden de carga — acá igual. */
+    it.each([
+      ["hermanos, el no-multi antes", "SingleModule, MultiModule", "", ""],
+      ["hermanos, el no-multi después", "MultiModule, SingleModule", "", ""],
+      ["importado multi, propio no-multi", "MultiModule", single("own"), ""],
+      ["importado no-multi, propio multi", "SingleModule", multi("own"), ""],
+      ["forRoot no-multi, propio multi", "MixModule.forRoot()", multi("own"), single("import")],
+      ["forRoot multi, propio no-multi", "MixModule.forRoot()", single("own"), multi("import")],
+      ["importado multi, forRoot no-multi", "MultiModule, MixModule.forRoot()", "", single("import")],
+    ])("mezclar multi y no-multi entre módulos es error: %s", async (_, imports, own, forRootProvider) => {
+      const module = (name: string, provider: string) =>
+        `import { NgModule } from "ngjs-core";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [], providers: [${provider}] })
+export class ${name} {}
+`;
+      await write("tokens.ts", `class InjectionToken<T> { constructor(readonly description: string) {} }\nexport const HOOKS = new InjectionToken<string[]>("hooks");\n`);
+      await write("multi.module.ts", module("MultiModule", multi("multi")));
+      await write("single.module.ts", module("SingleModule", single("single")));
+      await write(
+        "mix.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [] })
+export class MixModule {
+  static forRoot() { return { ngModule: MixModule, providers: [${forRootProvider}] }; }
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { MixModule } from "./mix.module";
+import { MultiModule } from "./multi.module";
+import { SingleModule } from "./single.module";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [${imports}], providers: [${own}] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      await expect(bootstrap("")).rejects.toThrow(/mezcla providers multi y no-multi para el token ".*" entre módulos/);
+    });
+  });
+
+  describe("ModuleWithProviders con una clase como token", () => {
+    async function logModule(loggerDecorator: string): Promise<void> {
+      await write(
+        "logger.ts",
+        `import { Injectable } from "ngjs-core";
+
+${loggerDecorator}
+export abstract class Logger { abstract log(message: string): string; }
+
+@Injectable()
+export class ConsoleLogger extends Logger {
+  log(message: string): string { return "console:" + message; }
+}
+`,
+      );
+      await write(
+        "log.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { ConsoleLogger, Logger } from "./logger";
+
+@NgModule({ declarations: [], imports: [] })
+export class LogModule {
+  static forRoot() {
+    return { ngModule: LogModule, providers: [{ provide: Logger, useClass: ConsoleLogger }] };
+  }
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { LogModule } from "./log.module";
+
+@NgModule({ declarations: [], imports: [LogModule.forRoot()] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+    }
+
+    it("con @Injectable() (aunque sea abstracta) tiene nombre en runtime", async () => {
+      await logModule("@Injectable()");
+
+      const { injector } = await bootstrap("");
+
+      expect(injector.get<{ log(message: string): string }>(TokenName.of("Logger", "test-app")).log("x")).toBe("console:x");
+    });
+
+    it("sin @Injectable() es error al correr, que dice qué agregar", async () => {
+      await logModule("");
+
+      await expect(bootstrap("")).rejects.toThrow(/el token Logger no tiene nombre de DI en runtime .* agregale @Injectable\(\)/);
+    });
+  });
+
   it("@HostBinding/@HostListener: $watch aplica la clase, $element.on corre dentro de $apply, $destroy limpia todo", async () => {
     await write(
       "toggle.component.ts",
@@ -635,6 +1291,103 @@ const modules: Record<string, unknown> = { app: AppModule };
     const appRoot = dom.window.document.querySelector("app-root");
     expect(appRoot?.textContent).toBe("Ana (module)");
     expect(injector.get<{ source(): string }>(TokenName.of("Logger", "test-app")).source()).toBe("module");
+  });
+
+  it("DI de Angular 16 por la plataforma: InjectionToken con factory, @Injectable con receta, useFactory con inject(), [new Optional(), X], @Attribute y forwardRef", async () => {
+    await write(
+      "tokens.ts",
+      `import { InjectionToken, inject } from "ngjs-core";
+import { Config } from "./services";
+
+export const API_URL = new InjectionToken<string>("api.url", { factory: () => inject(Config).base + "/api" });
+export const MISSING = new InjectionToken<string>("missing");
+`,
+    );
+    await write(
+      "services.ts",
+      `import { Injectable } from "ngjs-core";
+
+@Injectable({ providedIn: "root" })
+export class Config { base = "https://host"; }
+
+@Injectable({ providedIn: "root", useClass: forwardRef(() => ConsoleLogger) })
+export abstract class Logger { abstract log(message: string): string; }
+
+@Injectable()
+export class ConsoleLogger extends Logger { log(message: string): string { return "console:" + message; } }
+
+@Injectable({ providedIn: "root", useFactory: (logger: Logger) => ({ greet: () => logger.log("hola") }), deps: [Logger] })
+export abstract class Greeter { abstract greet(): string; }
+
+@Injectable()
+export class Unprovided {}
+`,
+    );
+    await write(
+      "app.component.ts",
+      `import { Attribute, Component, Inject } from "ngjs-core";
+import { API_URL } from "./tokens";
+
+@Component({ selector: "app-root", template: "<p>{{ $ctrl.kind }} {{ $ctrl.url }}</p>" })
+export class AppComponent {
+  constructor(@Attribute("kind") readonly kind: string, @Inject(API_URL) readonly url: string) {}
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule, Optional, inject } from "ngjs-core";
+import { AppComponent } from "./app.component";
+import { API_URL, MISSING } from "./tokens";
+import { Greeter, Unprovided } from "./services";
+
+@NgModule({
+  declarations: [AppComponent],
+  imports: [],
+  providers: [
+    { provide: "report", useFactory: (greeter: Greeter, missing: unknown) => ({ greeting: greeter.greet(), missing, url: inject(API_URL), optional: inject(MISSING, { optional: true }) }), deps: [Greeter, [new Optional(), Unprovided]] },
+  ],
+  bootstrap: [AppComponent],
+})
+export class AppModule {}
+`,
+    );
+    await mkdir(join(dir, "node_modules", "ngjs-core"), { recursive: true });
+    await writeFile(join(dir, "node_modules", "ngjs-core", "package.json"), JSON.stringify({ name: "ngjs-core", main: "index.js" }), "utf8");
+    await writeFile(
+      join(dir, "node_modules", "ngjs-core", "index.js"),
+      // `inject` existe (el factory original sigue en la declaración del usuario) pero no debería correr nunca:
+      // el que se usa es el `ɵprov.factory` que armó el compilador, con los `inject()` ya resueltos.
+      `export const platformBrowserDynamic = () => globalThis.ɵngjsPlatform;
+export class InjectionToken { constructor(description) { this.description = description; } }
+export function inject() { throw new Error("inject() de runtime no debería correr"); }
+`,
+      "utf8",
+    );
+    await write(
+      "main.ts",
+      `import { platformBrowserDynamic } from "ngjs-core";
+import { AppModule } from "./app.module";
+
+(window as unknown as { app: Promise<unknown> }).app = platformBrowserDynamic().bootstrapModule(AppModule);
+`,
+    );
+
+    const result = await build({
+      entryPoints: [join(dir, "main.ts")],
+      bundle: true,
+      write: false,
+      format: "iife",
+      logLevel: "silent",
+      nodePaths: [NODE_MODULES],
+      plugins: [pluginLoader(dir)],
+    });
+    const dom = new JSDOM(`<body><app-root kind="card"></app-root></body>`, { runScripts: "outside-only" });
+    dom.window.eval(result.outputFiles[0]!.text);
+    const injector = await (dom.window as unknown as { app: Promise<auto.IInjectorService> }).app;
+
+    expect(dom.window.document.querySelector("app-root")?.textContent).toBe("card https://host/api");
+    expect(injector.get("report")).toEqual({ greeting: "console:hola", missing: null, url: "https://host/api", optional: null });
   });
 
   it("patches globales automáticos: async/await, setTimeout y un addEventListener nativo actualizan la vista solos, sin digest manual (sin NgZone — esa clase la provee ngjs-core, no este compilador)", async () => {

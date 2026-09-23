@@ -2,6 +2,7 @@ import type { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { decoratorMetadataTransform } from "@/compiler/decorator-metadata-transform.ts";
 import { decoratorReaderTransform } from "@/compiler/decorator-reader.ts";
 import { decoratorWriterTransform } from "@/compiler/decorator-writer.ts";
+import { injectionTokenWriterTransform } from "@/compiler/injection-token-writer.ts";
 import { createModuleWriterTransform } from "@/compiler/module-writer.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 
@@ -18,6 +19,7 @@ export function createNgjsCompilerTransforms(scanner: ApplicationScanner): NgjsT
   return [
     decoratorReaderTransform,
     decoratorWriterTransform,
+    injectionTokenWriterTransform,
     createModuleWriterTransform(scanner),
     decoratorMetadataTransform,
   ];

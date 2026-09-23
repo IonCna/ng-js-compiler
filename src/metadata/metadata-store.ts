@@ -17,6 +17,24 @@ export class MetadataStore {
     return MetadataStore.store.get(path) ?? [];
   }
 
+  /**
+   * Una clase decorada por nombre, en cualquier archivo ya leído (los nombres son únicos en el proyecto — ver
+   * `ApplicationScanner`, que lee todo antes de emitir). Para `ClassHierarchy`: la base de un `extends` suele estar
+   * en otro archivo.
+   */
+  static findClass(className: string): DecoratorMetadata | undefined {
+    for (const metadata of MetadataStore.store.values()) {
+      const found = metadata.find((candidate) => candidate.className === className);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  /** Todo lo leído, por archivo (`[path, metadata]`). */
+  static entries(): [string, DecoratorMetadata[]][] {
+    return [...MetadataStore.store.entries()];
+  }
+
   static clear(): void {
     MetadataStore.store.clear();
   }

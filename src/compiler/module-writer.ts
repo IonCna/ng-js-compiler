@@ -1,8 +1,13 @@
 import type { ApplicationNode } from "@/compiler/application-node.ts";
 import type { ApplicationScanner } from "@/compiler/application-scanner.ts";
+import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
 import { ComponentBindings } from "@/compiler/component-bindings.ts";
+import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HashId } from "@/compiler/hash-id.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { ModuleWithProvidersRuntime } from "@/compiler/module-with-providers-runtime.ts";
+import { MultiProvidersRuntime } from "@/compiler/multi-providers-runtime.ts";
+import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import { ScopedInjectorRuntime } from "@/compiler/scoped-injector-runtime.ts";
 import { type ParsedSelector, SelectorParser } from "@/compiler/selector-parser.ts";
 import type {
@@ -43,6 +48,8 @@ export class ModuleWriter {
     // de lo nativo). Ver `ScopedInjectorRuntime`.
     const needsScopedInjector = this.scanner.hasScopedProviders();
     let scopedInjectorEmitted = false;
+    // Cada módulo registra `ɵresolve` si alguna dependencia del proyecto lleva flags (`@Optional()`, …) — ver `ResolveDependency`.
+    const registerResolve = this.scanner.usesInjectFlags();
 
     const statements = modules.map((metadata) => {
       const node = this.scanner.get(metadata.className);
@@ -50,34 +57,57 @@ export class ModuleWriter {
       const isRoot = (metadata as NgModuleMetadata).bootstrap.length > 0;
       const attachScopedInjector = isRoot && needsScopedInjector;
       scopedInjectorEmitted ||= attachScopedInjector;
-      return ModuleWriter.moduleStatement(node, attachScopedInjector);
+      return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve);
     });
 
-    const prelude = scopedInjectorEmitted ? `${ScopedInjectorRuntime.source()}\n` : "";
+    const needsModuleWithProviders = modules.some((metadata) => this.scanner.get(metadata.className)!.callImports.length > 0);
+    // Los `multi` de un `ModuleWithProviders` también pasan por `MultiProvidersRuntime`.
+    const needsMultiProviders =
+      needsModuleWithProviders ||
+      modules.some((metadata) => (metadata as NgModuleMetadata).providers.some((provider) => provider.kind !== "class" && provider.multi));
+    const prelude = [
+      ...(scopedInjectorEmitted ? [ScopedInjectorRuntime.source()] : []),
+      ...(needsModuleWithProviders ? [ModuleWithProvidersRuntime.source()] : []),
+      ...(needsMultiProviders ? [MultiProvidersRuntime.source()] : []),
+    ]
+      .map((source) => `${source}\n`)
+      .join("");
     return `import ${ANGULAR} from "angular";\n${prelude}${code}\n${statements.join("\n")}\n`;
   }
 
-  private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean): string {
+  private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean, registerResolve: boolean): string {
     const id = ModuleWriter.idFor(node);
+    // Cada llamada de `imports` (`ConfigModule.forRoot(options)`) se evalúa UNA vez: su resultado da el nombre
+    // del módulo (`requires`) y los `providers` a registrar. Ver `ModuleWithProvidersRuntime`.
+    const calls = node.callImports.map((expr, index) => ({ name: `ɵ${node.className}_import${index}`, expr }));
     // `@NgModule` propios por REFERENCIA (`X.ɵmod.id`), no por el string del id: así el `import { X }` sigue en
     // uso y ese archivo se evalúa antes (si no, SWC lo elimina y su `angular.module` nunca se registra).
-    // Después los legacy (expresión que da su nombre).
-    const requires = [...node.imports.map((imported) => `${imported.className}.ɵmod.id`), ...node.legacyImports];
+    // Después los legacy (expresión que da su nombre) y los de las llamadas.
+    const requires = [
+      ...node.imports.map((imported) => `${imported.className}.ɵmod.id`),
+      ...node.legacyImports,
+      ...calls.map((call) => `ɵimportedModuleName(${call.name})`),
+    ];
 
-    const calls = [
-      ...ModuleWriter.providerCalls(node),
+    const chainCalls = [
+      ...ModuleWriter.providerCalls(node, id),
+      ...(registerResolve ? [ResolveDependency.factoryFragment()] : []),
       ...(attachScopedInjector ? [ScopedInjectorRuntime.decoratorFragment()] : []),
       ...node.declarations.components.flatMap(ModuleWriter.componentCall),
       ...node.declarations.directives.flatMap(ModuleWriter.directiveCall),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),
     ];
 
-    const chain = [`${ANGULAR}.module(${JSON.stringify(id)}, [${requires.join(", ")}])`, ...calls].join("\n  ");
+    // `providers` de los `ModuleWithProviders` antes que los propios (encadenados después): el propio gana, como Angular.
+    const module = `${ANGULAR}.module(${JSON.stringify(id)}, [${requires.join(", ")}])`;
+    const head = calls.length ? `ɵimportProviders(${module}, [${calls.map((call) => call.name).join(", ")}])` : module;
+    const chain = [head, ...chainCalls].join("\n  ");
+    const evaluations = calls.map((call) => `const ${call.name} = ${call.expr};\n`).join("");
     // `ɵmod` como en Ivy — el id del `angular.module` (para que otro `@NgModule` lo importe por referencia) y los
     // tags de `bootstrap` (los monta `bootstrapModule()` de la plataforma, ver `PlatformCode`).
     const bootstrap = ModuleWriter.bootstrapTags(node);
     const mod = bootstrap.length ? `{ id: ${JSON.stringify(id)}, bootstrap: ${JSON.stringify(bootstrap)} }` : `{ id: ${JSON.stringify(id)} }`;
-    return `${node.className}.ɵmod = ${mod};\n${chain};`;
+    return `${evaluations}${node.className}.ɵmod = ${mod};\n${chain};`;
   }
 
   /** Como Angular: cada componente de `bootstrap` tiene que estar en `declarations` del mismo módulo y tener selector de elemento. */
@@ -99,10 +129,11 @@ export class ModuleWriter {
 
   /**
    * `providers` del `@NgModule` → registración nativa, una por token. Como en Angular: el último
-   * provider de un token gana; los `multi` se juntan en un array (cada uno se registra aparte como
-   * `token#multi#i` y un `.factory(token)` los inyecta a todos); mezclar multi y no-multi es error.
+   * provider de un token gana; los `multi` se juntan en un array con los del resto de la app (cada uno se
+   * registra aparte como `token#multi#<id>#i` y `MultiProvidersRuntime` arma el `.factory(token)` con todos);
+   * mezclar multi y no-multi es error.
    */
-  private static providerCalls(node: ApplicationNode): string[] {
+  private static providerCalls(node: ApplicationNode, id: string): string[] {
     const { providers } = node.metadata as NgModuleMetadata;
     const single = new Map<string, ProviderMetadata>();
     const multi = new Map<string, ProviderMetadata[]>();
@@ -118,11 +149,9 @@ export class ModuleWriter {
 
     const calls = [...single].map(([token, provider]) => ModuleWriter.providerCall(token, provider));
     for (const [token, group] of multi) {
-      const members = group.map((_, index) => `${token}#multi#${index}`);
+      const members = group.map((_, index) => `${token}#multi#${id}#${index}`);
       calls.push(...group.map((provider, index) => ModuleWriter.providerCall(members[index]!, provider)));
-      calls.push(
-        `.factory(${JSON.stringify(token)}, [${[...members.map((member) => JSON.stringify(member)), "function () { return Array.prototype.slice.call(arguments); }"].join(", ")}])`,
-      );
+      calls.push(MultiProvidersRuntime.configFragment(token, members));
     }
     return calls;
   }
@@ -135,20 +164,25 @@ export class ModuleWriter {
         // `.value` evalúa la expresión al registrar — como `useValue` en Angular, no lazy.
         return `.value(${key}, ${provider.valueExpr})`;
       case "useFactory":
-        return `.factory(${key}, [${[...provider.deps.map((dep) => JSON.stringify(dep)), provider.factoryExpr].join(", ")}])`;
+        // Con flags en `deps` (`[new Optional(), X]`) o `inject()` en el cuerpo hace falta un wrapper (`FactoryCode`).
+        if (FactoryCode.isPlain(provider.depFlags, provider.injectTokens)) {
+          return `.factory(${key}, [${[...provider.deps.map((dep) => JSON.stringify(dep)), provider.factoryExpr].join(", ")}])`;
+        }
+        return `.factory(${key}, ${FactoryCode.array(provider.deps, provider.depFlags, provider.injectTokens, (args) => `(${provider.factoryExpr})(${args})`)})`;
       case "useExisting":
         return `.factory(${key}, [${JSON.stringify(provider.existingToken)}, function (existing) { return existing; }])`;
       default: {
         // class / constructor / useClass: sin `deps` el `ɵfac` de la clase; con `deps`, `new X(...deps)`.
         const cls = /^[\w$]+$/.test(provider.classExpr) ? provider.classExpr : `(${provider.classExpr})`;
-        const deps = provider.kind === "class" ? undefined : provider.deps;
-        if (!deps) {
-          // Sin `ɵfac` (clase sin decorador) solo se puede construir sin argumentos — igual que en Angular.
-          return `.factory(${key}, ${cls}.ɵfac || [function () { return new ${cls}(); }])`;
+        if (provider.kind === "class") {
+          // La clase sola (`providers: [X]`) se provee con su receta de `@Injectable` si la tiene (`ɵprov.factory`, como Ivy).
+          return `.factory(${key}, (Object.prototype.hasOwnProperty.call(${cls}, "ɵprov") && ${cls}.ɵprov.factory) || ${FactoryCode.ownFactory(cls)})`;
         }
-        const params = deps.map((_, index) => `a${index}`).join(", ");
-        const factory = `function (${params}) { return new ${cls}(${params}); }`;
-        return `.factory(${key}, [${[...deps.map((dep) => JSON.stringify(dep)), factory].join(", ")}])`;
+        if (!provider.deps) {
+          // Sin `ɵfac` (clase sin decorador) solo se puede construir sin argumentos — igual que en Angular.
+          return `.factory(${key}, ${FactoryCode.ownFactory(cls)})`;
+        }
+        return `.factory(${key}, ${FactoryCode.array(provider.deps, provider.depFlags, undefined, (args) => `new ${cls}(${args})`)})`;
       }
     }
   }
@@ -178,7 +212,8 @@ export class ModuleWriter {
    * con una válida, el dedupe la taparía y el error nunca saldría.
    */
   private static componentCall(node: ApplicationNode): string[] {
-    const metadata = node.metadata as ComponentMetadata;
+    // Con los inputs/outputs heredados de sus bases del proyecto (`ClassHierarchy`).
+    const metadata = ClassHierarchy.effective(node.metadata as ComponentMetadata);
     const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
     const alternatives = SelectorParser.parse(options.selector);
 
@@ -203,8 +238,12 @@ export class ModuleWriter {
   }
 
   private static directiveCall(node: ApplicationNode): string[] {
-    const metadata = node.metadata as DirectiveMetadata;
-    const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
+    // Con los inputs/outputs heredados de sus bases del proyecto (`ClassHierarchy`).
+    const metadata = ClassHierarchy.effective(node.metadata as DirectiveMetadata);
+    const options = metadata.options as { selector?: string; template?: string; templateUrl?: string; controllerAs?: string };
+    if (!options.selector) {
+      throw new Error(`ModuleWriter: "${node.className}" no tiene selector — una @Directive() abstracta (base) no se declara en un @NgModule, como en Angular.`);
+    }
     const alternatives = ModuleWriter.uniqueByName(SelectorParser.parse(options.selector));
     const bindings = ComponentBindings.from(metadata.inputs, metadata.outputs);
 

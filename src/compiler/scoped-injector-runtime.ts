@@ -1,3 +1,6 @@
+import { HOST_DATA_KEY } from "@/compiler/element-instances.ts";
+import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
+
 /**
  * Injector jerárquico por elemento, emulado sobre `$controller`/jqLite — la versión "sin runtime propio"
  * de `ElementInjectorNode`/`scoped-injector-bridge.ts` de `ngjs-core` (ver CONCEPTOS "Inyector jerárquico"
@@ -23,9 +26,12 @@ export class ScopedInjectorRuntime {
   static source(): string {
     const key = JSON.stringify(ScopedInjectorRuntime.DATA_KEY);
 
-    return `function ɵElementInjectorNode(providers, parent, $injector) {
+    return `function ɵElementInjectorNode(providers, parent, $injector, element, boundary) {
   this.parent = parent;
   this.$injector = $injector;
+  // El elemento donde está anclado y el límite de \`@Host\` de quien lo creó.
+  this.element = element;
+  this.boundary = boundary;
   this.singles = {};
   this.multis = {};
   this.cache = {};
@@ -35,7 +41,47 @@ export class ScopedInjectorRuntime {
     else { this.singles[p.token] = p; }
   }
 }
+var ɵNOT_FOUND = {};
 ɵElementInjectorNode.prototype.resolve = function (name) {
+  if (name === ${JSON.stringify(ResolveDependency.TOKEN)}) return this.resolverFor(this.boundary);
+  return this.resolveWith(name, {});
+};
+/** \`ɵresolve\` para quien pide desde un elemento cuyo límite de \`@Host\` es \`boundary\`. */
+ɵElementInjectorNode.prototype.resolverFor = function (boundary) {
+  var self = this;
+  return function (token, flags) {
+    flags = flags || {};
+    return flags.host ? self.resolveHost(token, flags, boundary) : self.resolveWith(token, flags);
+  };
+};
+// Misma semántica que \`ElementInjectorNode.resolve\` de ngjs-core: \`self\` = solo este nodo; \`skipSelf\` = arranca
+// en el padre; al subir solo sigue valiendo \`optional\`.
+ɵElementInjectorNode.prototype.resolveWith = function (name, flags) {
+  if (flags.host) return this.resolveHost(name, flags, this.boundary);
+  if (!flags.skipSelf) {
+    var own = this.resolveOwn(name);
+    if (own !== ɵNOT_FOUND) return own;
+    if (flags.self) {
+      if (flags.optional) return null;
+      throw new Error("ɵElementInjectorNode: no hay provider para \\"" + name + "\\" con { self: true }.");
+    }
+  }
+  if (this.parent) return this.parent.resolveWith(name, { optional: flags.optional });
+  if (!flags.optional) return this.$injector.get(name);
+  return this.$injector.has(name) ? this.$injector.get(name) : null;
+};
+// \`@Host\` como Angular (no como ngjs-core, que corta en el nodo propio y cae a la app): sube por los nodos mientras
+// su elemento esté dentro del host (\`boundary\`, el elemento del componente dueño de la vista) y NO consulta la app.
+ɵElementInjectorNode.prototype.resolveHost = function (name, flags, boundary) {
+  var within = function (node) { return !boundary || !node.element || node.element === boundary || boundary.contains(node.element); };
+  for (var node = flags.skipSelf ? this.parent : this; node && within(node); node = node.parent) {
+    var own = node.resolveOwn(name);
+    if (own !== ɵNOT_FOUND) return own;
+  }
+  if (flags.optional) return null;
+  throw new Error("ɵElementInjectorNode: no hay provider para \\"" + name + "\\" con { host: true } (entre este elemento y su host).");
+};
+ɵElementInjectorNode.prototype.resolveOwn = function (name) {
   if (Object.prototype.hasOwnProperty.call(this.cache, name)) return this.cache[name];
   if (Object.prototype.hasOwnProperty.call(this.multis, name)) {
     var resolved = this.multis[name].map(this.instantiate, this);
@@ -47,8 +93,7 @@ export class ScopedInjectorRuntime {
     this.cache[name] = resolved;
     return resolved;
   }
-  if (this.parent) return this.parent.resolve(name);
-  return this.$injector.get(name);
+  return ɵNOT_FOUND;
 };
 ɵElementInjectorNode.prototype.instantiate = function (descriptor) {
   var self = this;
@@ -57,8 +102,12 @@ export class ScopedInjectorRuntime {
   if (descriptor.kind === "useFactory") return descriptor.factory.apply(null, descriptor.deps.map(resolve));
   if (descriptor.kind === "useExisting") return resolve(descriptor.existing);
   if (descriptor.deps) return new (Function.prototype.bind.apply(descriptor.ctor, [null].concat(descriptor.deps.map(resolve))))();
-  var fac = descriptor.ctor.ɵfac;
-  if (!fac) return new descriptor.ctor();
+  // Solo lo PROPIO de la clase: un \`ɵfac\` heredado construiría a la base (subclase provista sin \`@Injectable()\`).
+  var ctor = descriptor.ctor;
+  var own = Object.prototype.hasOwnProperty;
+  var fac = (descriptor.kind === "class" && own.call(ctor, "ɵprov") && ctor.ɵprov.factory) || (own.call(ctor, "ɵfac") ? ctor.ɵfac : null);
+  if (!fac && ctor.ɵfac) throw new Error("\\"" + ctor.name + "\\" hereda el factory de su clase padre — agregale @Injectable() (Angular también lo exige).");
+  if (!fac) return new ctor();
   return fac[fac.length - 1].apply(null, fac.slice(0, -1).map(resolve));
 };
 ɵElementInjectorNode.prototype.destroy = function () { this.cache = {}; };
@@ -68,10 +117,15 @@ function ɵscopedController($delegate, $injector) {
     var $element = locals && locals.$element;
     if (!$element) return $delegate(expression, locals, later, ident);
 
+    // Límite de \`@Host\`: un componente es su propio host (su \`ɵfac\` marca el elemento para lo de adentro); una
+    // directiva mira el componente ancestro más cercano — el dueño de la vista donde está.
+    var isComponent = Boolean(expression && expression.ɵcomponent);
+    var boundary = isComponent ? $element[0] : ($element.parent ? $element.parent().inheritedData(${JSON.stringify(HOST_DATA_KEY)}) : undefined);
+
     var ownProviders = expression && expression.ɵproviders;
     var node = $element.inheritedData(${key});
     if (ownProviders && ownProviders.length) {
-      node = new ɵElementInjectorNode(ownProviders, node, $injector);
+      node = new ɵElementInjectorNode(ownProviders, node, $injector, $element[0], boundary);
       $element.data(${key}, node);
       var $scope = locals.$scope;
       if ($scope && $scope.$on) {
@@ -86,7 +140,8 @@ function ɵscopedController($delegate, $injector) {
       var name = depNames[i];
       if (locals && Object.prototype.hasOwnProperty.call(locals, name)) continue;
       extra = extra || {};
-      extra[name] = node.resolve(name);
+      // \`ɵresolve\` con el límite de \`@Host\` de ESTE elemento (el nodo puede ser heredado de un ancestro).
+      extra[name] = name === ${JSON.stringify(ResolveDependency.TOKEN)} ? node.resolverFor(boundary) : node.resolve(name);
     }
     if (!extra) return $delegate(expression, locals, later, ident);
 

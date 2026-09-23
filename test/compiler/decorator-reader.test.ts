@@ -44,6 +44,257 @@ describe("decoratorReaderTransform", () => {
     expect(metadata.constructorTokens).toEqual([own("SomeToken"), own("HttpClient")]);
   });
 
+  it("texto no ASCII antes del decorador (comentario con tildes): se saca el decorador justo, sin correr el corte", async () => {
+    const code = `// configuración del módulo — ñandú\n@Injectable()\nexport class FooService {\n  constructor(@Inject("$http") private http: unknown) {}\n}\n`;
+
+    const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+
+    expect(result).toBe(`// configuración del módulo — ñandú\n\nexport class FooService {\n  constructor( private http: unknown) {}\n}\n`);
+  });
+
+  describe("DI de Angular 16 resuelta en build", () => {
+    it("forwardRef(() => X) se desenvuelve en providers, deps, useClass, @Inject() e inject()", async () => {
+      const code = `
+        @Component({
+          selector: "app-card",
+          providers: [forwardRef(() => Logger), { provide: forwardRef(() => Base), useClass: forwardRef(() => Impl), deps: [forwardRef(() => Http)] }],
+        })
+        export class CardComponent {
+          private later = inject(forwardRef(() => Later));
+          constructor(@Inject(forwardRef(() => Config)) config: unknown) {}
+        }
+      `;
+
+      await decoratorReaderTransform.transform(code, "card.ts");
+      const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
+
+      expect(metadata.providers).toEqual([
+        { kind: "class", token: own("Logger"), classExpr: "Logger" },
+        { kind: "useClass", token: own("Base"), classExpr: "Impl", deps: [own("Http")], multi: false },
+      ]);
+      expect(metadata.constructorTokens).toEqual([own("Config")]);
+      expect(metadata.injectTokens).toEqual([{ token: own("Later"), flags: {} }]);
+    });
+
+    it("@Attribute('x'): no es DI, queda el nombre del atributo; en un servicio es error en build", async () => {
+      await decoratorReaderTransform.transform(
+        `@Directive({ selector: "[appBtn]" }) export class BtnDirective { constructor(@Attribute("type") type: string, http: HttpClient) {} }`,
+        "btn.ts",
+      );
+      const [metadata] = MetadataStore.get("btn.ts") as [ComponentMetadata];
+
+      expect(metadata.constructorAttributes).toEqual(["type", null]);
+      expect(metadata.constructorTokens).toEqual(["", own("HttpClient")]);
+      await expect(
+        decoratorReaderTransform.transform(`@Injectable() export class Foo { constructor(@Attribute("type") type: string) {} }`, "foo.ts"),
+      ).rejects.toThrow(/@Attribute\(\) solo existe en @Component\/@Directive/);
+    });
+
+    it("deps con [new Optional(), X] y useFactory con inject() en el cuerpo (no en funciones anidadas)", async () => {
+      const code = `
+        @NgModule({
+          declarations: [],
+          imports: [],
+          providers: [
+            { provide: "report", useFactory: (http: unknown, logger: unknown) => ({ http, logger, cfg: inject(Config), later: () => inject(Later) }), deps: [Http, [new Optional(), Logger]] },
+          ],
+        })
+        export class AppModule {}
+      `;
+
+      await decoratorReaderTransform.transform(code, "app.module.ts");
+      const [metadata] = MetadataStore.get("app.module.ts") as [NgModuleMetadata];
+
+      expect(metadata.providers).toEqual([
+        {
+          kind: "useFactory",
+          token: "report",
+          factoryExpr: '(http: unknown, logger: unknown) => ({ http, logger, cfg: globalThis.ɵngjsInjected["ɵfactory"][0], later: () => inject(Later) })',
+          deps: [own("Http"), own("Logger")],
+          depFlags: [{}, { optional: true }],
+          injectTokens: [{ token: own("Config"), flags: {} }],
+          multi: false,
+        },
+      ]);
+    });
+
+    it("@Injectable con receta: queda como recipe (el token es la propia clase)", async () => {
+      await decoratorReaderTransform.transform(
+        `@Injectable({ providedIn: "root", useFactory: (http: unknown) => new Impl(http), deps: [Http] }) export abstract class Api {}`,
+        "api.ts",
+      );
+      const [metadata] = MetadataStore.get("api.ts") as [ServiceMetadata];
+
+      expect(metadata.recipe).toEqual({ kind: "useFactory", token: own("Api"), factoryExpr: "(http: unknown) => new Impl(http)", deps: [own("Http")], multi: false });
+    });
+  });
+
+  describe("queries y hostDirectives (solo la definición)", () => {
+    it("lee @ViewChild/@ViewChildren/@ContentChild/@ContentChildren (también en un setter) y los saca del código", async () => {
+      const code = `
+        @Component({ selector: "app-tabs" })
+        export class TabsComponent {
+          @ViewChild(TabComponent) first!: TabComponent;
+          @ViewChildren("a, b") refs!: unknown;
+          @ContentChild(forwardRef(() => Label), { read: ElementRef, static: true }) label!: unknown;
+          @ContentChildren(TabComponent, { descendants: true }) tabs!: unknown;
+          @ContentChildren(Pane) panes!: unknown;
+          @ViewChild("box") set box(value: unknown) {}
+        }
+      `;
+
+      const result = await decoratorReaderTransform.transform(code, "tabs.ts");
+      const [metadata] = MetadataStore.get("tabs.ts") as [ComponentMetadata];
+
+      for (const decorator of ["@ViewChild", "@ViewChildren", "@ContentChild", "@ContentChildren"]) expect(result).not.toContain(decorator);
+      expect(metadata.queries).toEqual([
+        { kind: "view", propertyName: "first", first: true, predicate: { kind: "type", expr: "TabComponent" }, descendants: true, static: false },
+        { kind: "view", propertyName: "refs", first: false, predicate: { kind: "names", names: ["a", "b"] }, descendants: true, static: false },
+        { kind: "content", propertyName: "label", first: true, predicate: { kind: "type", expr: "Label" }, descendants: true, static: true, readExpr: "ElementRef" },
+        { kind: "content", propertyName: "tabs", first: false, predicate: { kind: "type", expr: "TabComponent" }, descendants: true, static: false },
+        { kind: "content", propertyName: "panes", first: false, predicate: { kind: "type", expr: "Pane" }, descendants: false, static: false },
+        { kind: "view", propertyName: "box", first: true, predicate: { kind: "names", names: ["box"] }, descendants: true, static: false },
+      ]);
+    });
+
+    it("lee hostDirectives en forma corta y larga (forwardRef desenvuelto)", async () => {
+      const code = `
+        @Directive({ selector: "[appMenu]", hostDirectives: [Focusable, { directive: forwardRef(() => Tooltip), inputs: ["text: tooltip"], outputs: ["shown"] }] })
+        export class MenuDirective {}
+      `;
+
+      await decoratorReaderTransform.transform(code, "menu.ts");
+      const [metadata] = MetadataStore.get("menu.ts") as [ComponentMetadata];
+
+      expect(metadata.hostDirectives).toEqual([
+        { directiveExpr: "Focusable" },
+        { directiveExpr: "Tooltip", inputs: ["text: tooltip"], outputs: ["shown"] },
+      ]);
+    });
+
+    it("una opción desconocida en una query es error en build", async () => {
+      const code = `@Component({ selector: "app-x" }) export class X { @ViewChild(Y, { lazy: true }) y!: unknown; }`;
+
+      await expect(decoratorReaderTransform.transform(code, "x.ts")).rejects.toThrow(/"X.y" — @ViewChild: opción "lazy" desconocida/);
+    });
+  });
+
+  describe("herencia", () => {
+    it("registra la base (nombre exportado, también con alias) y si la clase declara constructor propio", async () => {
+      const code = `
+        import { BaseCard as Base } from "./base";
+        @Component({ selector: "app-card" }) export class CardComponent extends Base {}
+        @Injectable() export class FooService { constructor(http: HttpClient) {} }
+      `;
+
+      await decoratorReaderTransform.transform(code, "card.ts");
+      const [card, foo] = MetadataStore.get("card.ts") as [ComponentMetadata, ServiceMetadata];
+
+      expect(card).toMatchObject({ superClass: "BaseCard", hasConstructor: false });
+      expect(foo.superClass).toBeUndefined();
+      expect(foo.hasConstructor).toBe(true);
+    });
+
+    it("una clase SIN decorador que usa features de Angular es error en build (como Angular desde v10)", async () => {
+      const code = `@Component({ selector: "app-card" }) export class CardComponent {}\nexport abstract class Base { @Input() label = ""; }`;
+
+      await expect(decoratorReaderTransform.transform(code, "card.ts")).rejects.toThrow(
+        /"Base" usa @Input pero no tiene decorador de clase — agregale @Directive\(\)\/@Injectable\(\)/,
+      );
+    });
+  });
+
+  describe("inject() durante la construcción", () => {
+    it("en campos de instancia y en el constructor: se reemplaza por el valor inyectado (por clase) y queda como dependencia (también con alias y optional)", async () => {
+      const code = `
+        import { inject as di } from "ngjs-core";
+        import { HttpClient } from "ngjs-core/http";
+        @Injectable()
+        export class FooService {
+          private http = inject(HttpClient);
+          private logger = di(Logger, { optional: true });
+          private label: string;
+          constructor() { this.label = inject("$locale").id; }
+        }
+      `;
+
+      const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+      const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
+
+      expect(result).toContain('private http = globalThis.ɵngjsInjected["FooService"][0];');
+      expect(result).toContain('private logger = globalThis.ɵngjsInjected["FooService"][1];');
+      expect(result).toContain('this.label = globalThis.ɵngjsInjected["FooService"][2].id;');
+      expect(metadata.injectTokens).toEqual([
+        { token: TokenName.of("HttpClient", "ngjs-core"), flags: {} },
+        { token: own("Logger"), flags: { optional: true } },
+        { token: "$locale", flags: {} },
+      ]);
+      expect(metadata.constructorImports).toEqual(["ngjs-core/http"]);
+    });
+
+    it("lo que no corre durante la construcción queda intacto: función anidada, método, campo static", async () => {
+      const code = `
+        @Injectable()
+        export class FooService {
+          static shared = inject(Config);
+          onClick = () => inject(Router);
+          constructor() { setTimeout(function () { inject(Later); }); }
+          load() { return inject(Http); }
+        }
+      `;
+
+      const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+      const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
+
+      expect(metadata.injectTokens).toEqual([]);
+      for (const call of ["inject(Config)", "inject(Router)", "inject(Later)", "inject(Http)"]) expect(result).toContain(call);
+    });
+
+    it.each([
+      ["opción desconocida", "inject(Logger, { lazy: true })", /opción desconocida \(solo `optional`\/`self`\/`skipSelf`\/`host`\)/],
+      ["token que no es clase/InjectionToken/string", "inject(tokens.logger)", /el token tiene que ser una clase, un InjectionToken o un string/],
+      ["opciones no literales", "inject(Logger, flags)", /las opciones tienen que ser un objeto literal/],
+    ])("%s es error en build", async (_, call, message) => {
+      const code = `@Injectable() export class FooService { private logger = ${call}; }`;
+
+      await expect(decoratorReaderTransform.transform(code, "foo.service.ts")).rejects.toThrow(message);
+    });
+  });
+
+  it("flags de DI: @Self/@SkipSelf/@Host/@Optional en el constructor, en inject() y como new X() en deps", async () => {
+    const code = `
+      @Component({ selector: "app-card", providers: [{ provide: "report", useFactory: (a: unknown) => a, deps: [[new SkipSelf(), new Optional(), Parent]] }] })
+      export class CardComponent {
+        private own = inject(Theme, { self: true, optional: false });
+        constructor(@Self() a: Local, @SkipSelf() @Optional() b: Parent | null, @Host() c: HostThing) {}
+      }
+    `;
+
+    const result = await decoratorReaderTransform.transform(code, "card.ts");
+    const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
+
+    for (const decorator of ["@Self", "@SkipSelf", "@Optional", "@Host"]) expect(result).not.toContain(decorator);
+    expect(metadata.constructorFlags).toEqual([{ self: true }, { skipSelf: true, optional: true }, { host: true }]);
+    expect(metadata.injectTokens).toEqual([{ token: own("Theme"), flags: { self: true } }]);
+    expect(metadata.providers[0]).toMatchObject({ deps: [own("Parent")], depFlags: [{ skipSelf: true, optional: true }] });
+  });
+
+  it("@Optional(): marca el parámetro, se saca del código y acepta `Tipo | null` como token", async () => {
+    const code = `
+      @Injectable()
+      export class FooService {
+        constructor(private http: HttpClient, @Optional() private logger: Logger | null, @Optional() @Inject(CONFIG) private config?: unknown) {}
+      }
+    `;
+
+    const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+    const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
+
+    expect(result).not.toContain("@Optional");
+    expect(metadata.constructorTokens).toEqual([own("HttpClient"), own("Logger"), own("CONFIG")]);
+    expect(metadata.constructorFlags).toEqual([{}, { optional: true }, { optional: true }]);
+  });
+
   it("@Inject('$http') (string literal) queda como literal, no identifier — es el nombre real de AngularJS", async () => {
     const code = `
       @Service()
@@ -215,10 +466,19 @@ describe("decoratorReaderTransform", () => {
       ]);
     });
 
+    it("cualquier otra llamada queda para evaluarse al correr (ModuleWithProviders), sin mirar el nombre del método", async () => {
+      const imports = await importsOf(`[ConfigModule.forRoot(options, withDebug()), configure({ debug: true })]`);
+
+      expect(imports).toEqual([
+        { kind: "call", expr: "ConfigModule.forRoot(options, withDebug())" },
+        { kind: "call", expr: "configure({ debug: true })" },
+      ]);
+    });
+
     it.each([
       ["imports que no es array literal", "SHARED_IMPORTS", /`imports` tiene que ser un array literal/],
       ["spread", "[...SHARED_IMPORTS]", /`imports` no admite huecos ni `...spread`/],
-      ["ModuleWithProviders (forRoot)", "[RouterModule.forRoot(routes)]", /import `RouterModule.forRoot\(routes\)` no soportado/],
+      ["condicional", "[debug ? DebugModule : ProdModule]", /import `debug \? DebugModule : ProdModule` no soportado/],
     ])("%s es error en build", async (_, imports, message) => {
       await expect(importsOf(imports)).rejects.toThrow(message);
     });
@@ -270,7 +530,8 @@ describe("decoratorReaderTransform", () => {
       ["clave desconocida", "[{ provide: Logger, useKlass: ConsoleLogger }]", /clave "useKlass" desconocida/],
       ["dos recetas", "[{ provide: Logger, useClass: ConsoleLogger, useValue: 1 }]", /solo una receta a la vez \(useClass, useValue\)/],
       ["multi no literal", "[{ provide: Logger, useValue: 1, multi: flag }]", /`multi` tiene que ser true\/false literal/],
-      ["deps con flags", "[{ provide: Logger, deps: [[new Optional(), HttpClient]] }]", /cada elemento de `deps`/],
+      ["deps con una clase que no es flag de DI", "[{ provide: Logger, deps: [[new Lazy(), HttpClient]] }]", /`new Lazy\(\)` en `deps` no es un flag de DI/],
+      ["deps con flags y sin token", "[{ provide: Logger, deps: [[new Optional()]] }]", /cada elemento de `deps`/],
       ["sin receta y provide string", '[{ provide: "logger" }]', /sin receta, `provide` tiene que ser una clase/],
     ])("%s es error en build, no se descarta en silencio", async (_, providers, message) => {
       await expect(providersOf(providers)).rejects.toThrow(message);

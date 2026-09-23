@@ -2,7 +2,8 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ApplicationNode } from "@/compiler/application-node.ts";
 import { DecoratorReader } from "@/compiler/decorator-reader.ts";
-import type { ModuleImport, NgModuleMetadata } from "@/metadata/decorator-metadata.ts";
+import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
+import type { ModuleImport, NgModuleMetadata, ProviderMetadata } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
 /**
@@ -51,6 +52,34 @@ export class ApplicationScanner {
     return false;
   }
 
+  /**
+   * Gate de todo el proyecto para `ResolveDependency`: si ninguna dependencia lleva flags (`@Optional()`/`@Self()`/…,
+   * `inject(X, { ... })`, `[new Optional(), X]` en `deps`), ningún módulo registra `ɵresolve`.
+   */
+  usesInjectFlags(): boolean {
+    for (const { metadata } of this.nodes.values()) {
+      const providers =
+        metadata.kind === "ngmodule" || metadata.kind === "component" || metadata.kind === "directive"
+          ? metadata.providers
+          : metadata.kind === "service" || metadata.kind === "injectable"
+            ? [metadata.recipe].filter((recipe): recipe is ProviderMetadata => recipe !== undefined)
+            : [];
+      if (providers.some(ApplicationScanner.providerUsesFlags)) return true;
+      if (metadata.kind === "ngmodule") continue;
+      if (metadata.constructorFlags.some(ResolveDependency.hasFlags) || metadata.injectTokens.some((injected) => ResolveDependency.hasFlags(injected.flags))) return true;
+    }
+    return false;
+  }
+
+  /** Flags en `deps` (`[new Optional(), X]`) o en los `inject()` del cuerpo de un `useFactory`. */
+  private static providerUsesFlags(provider: ProviderMetadata): boolean {
+    if (provider.kind === "class" || provider.kind === "useValue" || provider.kind === "useExisting") return false;
+    return Boolean(
+      provider.depFlags?.some(ResolveDependency.hasFlags) ||
+        (provider.kind === "useFactory" && provider.injectTokens?.some((injected) => ResolveDependency.hasFlags(injected.flags))),
+    );
+  }
+
   /** Pasada 2 — ya existen TODOS los nodos, así que resolver nombre → nodo no depende del orden de la pasada 1. */
   private resolve(): void {
     for (const node of this.nodes.values()) {
@@ -72,7 +101,8 @@ export class ApplicationScanner {
   /**
    * Primero se busca como clase del proyecto (`@NgModule` → su id). Si no es nuestra, en build no se sabe
    * qué es: un `@NgModule` de otro paquete compilado con ngjs trae `ɵmod.id`, un `IModule` legacy trae
-   * `.name` — se emite la expresión que elige al correr. Un string es el nombre tal cual.
+   * `.name` — se emite la expresión que elige al correr. Un string es el nombre tal cual. Una llamada queda
+   * para `ModuleWriter` (se evalúa una sola vez, al correr).
    */
   private resolveImport(node: ApplicationNode, imported: ModuleImport): void {
     switch (imported.kind) {
@@ -84,6 +114,9 @@ export class ApplicationScanner {
         return;
       case "expression":
         node.legacyImports.push(ApplicationScanner.externalModuleName(imported.expr));
+        return;
+      case "call":
+        node.callImports.push(imported.expr);
         return;
     }
 

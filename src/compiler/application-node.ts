@@ -25,6 +25,8 @@ export class ApplicationNode {
   imports: ApplicationNode[] = [];
   /** Módulos de AngularJS legacy de `imports` — expresiones JS que dan su nombre (`"ngAnimate"`, `legacyModule.name`). */
   legacyImports: string[] = [];
+  /** Llamadas de `imports` (`ConfigModule.forRoot(options)`), texto fuente — se evalúan al correr, ver `ModuleWithProvidersRuntime`. */
+  callImports: string[] = [];
 
   constructor(
     public readonly className: string,

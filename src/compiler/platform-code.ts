@@ -1,3 +1,4 @@
+import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import { ZonePatchesRuntime } from "@/compiler/zone-patches-runtime.ts";
 
 /** Como `projectType` de `angular.json`: una librería nunca arranca nada, solo una aplicación lleva la plataforma. */
@@ -40,7 +41,9 @@ export class PlatformCode {
         angular.element(document).ready(function () {
           try {
             if (!moduleType || !moduleType.ɵmod) throw new Error("bootstrapModule(): recibe una clase @NgModule compilada.");
-            var providers = angular.module(${JSON.stringify(ROOT_PROVIDERS_MODULE)}, []);
+            // \`ɵresolve\` siempre acá: un factory \`providedIn: "root"\` (\`InjectionToken\`, receta de \`@Injectable\`) puede pedirlo
+            // aunque ningún \`@NgModule\` del proyecto lo registre (ver \`ResolveDependency\`).
+            var providers = angular.module(${JSON.stringify(ROOT_PROVIDERS_MODULE)}, [])${ResolveDependency.factoryFragment()};
             globalThis.${ROOT_PROVIDERS_GLOBAL}.forEach(function (provider) { providers.factory(provider[0], provider[1]); });
             angular.module(${JSON.stringify(ROOT_MODULE)}, [${JSON.stringify(ROOT_PROVIDERS_MODULE)}, moduleType.ɵmod.id]);
             var host = document.body;
@@ -59,9 +62,12 @@ export class PlatformCode {
 ${ZonePatchesRuntime.source()}`;
   }
 
-  /** Lo que emite cada `@Injectable({ providedIn: "root" })` junto a su `ɵprov`: se anota en la cola de la plataforma. */
-  static rootProviderStatement(token: string, className: string): string {
-    return `(globalThis.${ROOT_PROVIDERS_GLOBAL} = globalThis.${ROOT_PROVIDERS_GLOBAL} || []).push([${JSON.stringify(token)}, ${className}.ɵfac]);`;
+  /**
+   * Lo que emite cada `providedIn: "root"` (`@Injectable`, `InjectionToken` con `factory`) junto a su `ɵprov`: se
+   * anota en la cola de la plataforma. `factory` es la expresión de la anotación (`X.ɵfac`, `X.ɵprov.factory`).
+   */
+  static rootProviderStatement(token: string, factory: string): string {
+    return `(globalThis.${ROOT_PROVIDERS_GLOBAL} = globalThis.${ROOT_PROVIDERS_GLOBAL} || []).push([${JSON.stringify(token)}, ${factory}]);`;
   }
 
   /** esbuild: la plataforma antepuesta al `banner.js` que ya tuviera el build. */

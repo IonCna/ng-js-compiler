@@ -14,13 +14,15 @@ function component(overrides: Partial<ComponentMetadata> = {}): ComponentMetadat
     kind: "component",
     className: "CardComponent",
     options: { selector: "app-card" },
-    constructorTokens: [], constructorImports: [],
+    constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [],
     inputs: [],
     outputs: [],
     hostBindings: [],
     hostListeners: [],
     providers: [],
     lifecycleHooks: [],
+    queries: [],
+    hostDirectives: [],
     ...overrides,
   };
 }
@@ -40,7 +42,7 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class CardComponent { constructor(u, h) { this.u = u; this.h = h; } }", "card.ts")!;
 
     expect(output).toContain(
-      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "$http", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { var instance = new CardComponent(a0, a1); return instance; }];',
+      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "$http", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new CardComponent(a0, a1); return instance; }];',
     );
     const fac = evaluate(output, "CardComponent").ɵfac as [
       string,
@@ -49,8 +51,80 @@ describe("DecoratorWriter", () => {
       string,
       (a: unknown, b: unknown, element: unknown, scope: unknown) => { u: unknown; h: unknown },
     ];
-    const instance = fac[4]("u", "h", {}, "the-scope");
+    const instance = fac[4]("u", "h", { data: () => undefined }, "the-scope");
     expect(instance).toMatchObject({ u: "u", h: "h" });
+  });
+
+  it("ɵfac con flags (@Optional()/@Self()/…): pide ɵresolve en esa posición y le pasa token + flags (+ que es de elemento)", () => {
+    MetadataStore.set("card.ts", [component({ constructorTokens: ["UserService_1a2b3c4d", "Logger_1a2b3c4d"], constructorFlags: [{}, { optional: true, self: true }] })]);
+
+    const output = DecoratorWriter.write("class CardComponent { constructor(u, l) { this.u = u; this.l = l; } }", "card.ts")!;
+
+    expect(output).toContain(
+      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "ɵresolve", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new CardComponent(a0, a1("Logger_1a2b3c4d", {"optional":true,"self":true}, true)); return instance; }];',
+    );
+    const fac = evaluate(output, "CardComponent").ɵfac as unknown[];
+    const factory = fac[4] as (u: unknown, optional: (token: string) => unknown, element: unknown, scope: unknown) => { u: unknown; l: unknown };
+    expect(factory("u", () => null, { data: () => undefined }, "the-scope")).toMatchObject({ u: "u", l: null });
+  });
+
+  it("inject() en la construcción: deps extra del ɵfac, expuestas (por clase) solo mientras corre el new", () => {
+    MetadataStore.set("foo.ts", [
+      {
+        kind: "injectable",
+        className: "FooService",
+        options: {},
+        constructorTokens: ["UserService_1a2b3c4d"],
+        constructorFlags: [],
+        constructorAttributes: [],
+        injectTokens: [
+          { token: "Http_1a2b3c4d", flags: {} },
+          { token: "Logger_1a2b3c4d", flags: { optional: true } },
+        ],
+        constructorImports: [],
+        token: "FooService_1a2b3c4d",
+      },
+    ]);
+
+    const output = DecoratorWriter.write(
+      'class FooService { http = globalThis.ɵngjsInjected["FooService"][0]; logger = globalThis.ɵngjsInjected["FooService"][1]; constructor(u) { this.u = u; } }',
+      "foo.ts",
+    )!;
+
+    expect(output).toContain(
+      'FooService.ɵfac = ["UserService_1a2b3c4d", "Http_1a2b3c4d", "ɵresolve", function FooService_Factory(a0, i0, i1) { var ɵprevious = globalThis.ɵngjsInjected; globalThis.ɵngjsInjected = { "FooService": [i0, i1("Logger_1a2b3c4d", {"optional":true})] }; try { var instance = new FooService(a0); } finally { globalThis.ɵngjsInjected = ɵprevious; } return instance; }];',
+    );
+    const FooService = evaluate(output, "FooService") as unknown as { ɵfac: unknown[] };
+    const factory = FooService.ɵfac[3] as (u: unknown, http: unknown, optional: (token: string) => unknown) => Record<string, unknown>;
+    expect(factory("u", "http", () => null)).toMatchObject({ u: "u", http: "http", logger: null });
+  });
+
+  it("queries y hostDirectives: la definición en ɵcmp (formato Ivy), clases como getters que resuelven al leerse; las de la base se heredan", () => {
+    MetadataStore.set("base.ts", [
+      {
+        ...component({ className: "BaseTabs", options: {} }),
+        kind: "directive",
+        queries: [{ kind: "view", propertyName: "box", first: true, predicate: { kind: "names", names: ["box"] }, descendants: true, static: false }],
+      } as DirectiveMetadata,
+    ]);
+    MetadataStore.set("tabs.ts", [
+      component({
+        className: "TabsComponent",
+        superClass: "BaseTabs",
+        options: { selector: "app-tabs" },
+        queries: [{ kind: "content", propertyName: "tabs", first: false, predicate: { kind: "type", expr: "Tab" }, descendants: false, static: false, readExpr: "Ref" }],
+        hostDirectives: [{ directiveExpr: "Focusable", inputs: ["text"] }],
+      }),
+    ]);
+
+    // `Tab`/`Ref`/`Focusable` se declaran DESPUÉS del estampado: el getter igual los resuelve al leerse.
+    const output = DecoratorWriter.write("class TabsComponent {}", "tabs.ts")! + "\nclass Tab {}\nclass Ref {}\nclass Focusable {}\n";
+    const def = (evaluate(output, "TabsComponent") as { ɵcmp: Record<string, unknown[]> }).ɵcmp;
+
+    expect(def.queries).toEqual([{ propertyName: "tabs", first: false, descendants: false, static: false, predicate: expect.any(Function), read: expect.any(Function) }]);
+    expect((def.queries![0] as { predicate: { name: string } }).predicate.name).toBe("Tab");
+    expect(def.viewQueries).toEqual([{ propertyName: "box", first: true, descendants: true, static: false, predicate: ["box"] }]);
+    expect(def.hostDirectives).toEqual([{ directive: expect.any(Function), inputs: ["text"] }]);
   });
 
   it("un import de efecto por cada archivo del que viene una dependencia del constructor (que se evalúe aunque solo se use como tipo)", () => {
@@ -67,13 +141,13 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
 
     expect(output).toContain(
-      'CardComponent.ɵfac = ["$element", "$scope", function CardComponent_Factory($element, $scope) { var instance = new CardComponent(); return instance; }];',
+      'CardComponent.ɵfac = ["$element", "$scope", function CardComponent_Factory($element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new CardComponent(); return instance; }];',
     );
   });
 
   it("ɵfac de @Injectable/@Pipe: sin $element/$scope — no son controllers de AngularJS", () => {
     MetadataStore.set("pipes.ts", [
-      { kind: "pipe", className: "UpperPipe", options: { name: "upper" }, constructorTokens: [], constructorImports: [] },
+      { kind: "pipe", className: "UpperPipe", options: { name: "upper" }, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [] },
     ]);
 
     const output = DecoratorWriter.write("class UpperPipe {}", "pipes.ts")!;
@@ -221,7 +295,7 @@ describe("DecoratorWriter", () => {
 
   it("ɵprov con el token resuelto en build; providedIn solo si es 'root'", () => {
     MetadataStore.set("foo.service.ts", [
-      { kind: "injectable", className: "FooService", options: { providedIn: "root" }, constructorTokens: [], constructorImports: [], token: "FooService_1a2b3c4d" },
+      { kind: "injectable", className: "FooService", options: { providedIn: "root" }, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [], token: "FooService_1a2b3c4d" },
     ]);
 
     const output = DecoratorWriter.write("class FooService {}", "foo.service.ts")!;
@@ -232,8 +306,8 @@ describe("DecoratorWriter", () => {
 
   it("providedIn root se anota en la cola de la plataforma; sin providedIn no", () => {
     MetadataStore.set("services.ts", [
-      { kind: "injectable", className: "RootService", options: { providedIn: "root" }, constructorTokens: [], constructorImports: [], token: "RootService_1a2b3c4d" },
-      { kind: "injectable", className: "LocalService", options: {}, constructorTokens: [], constructorImports: [], token: "LocalService_1a2b3c4d" },
+      { kind: "injectable", className: "RootService", options: { providedIn: "root" }, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [], token: "RootService_1a2b3c4d" },
+      { kind: "injectable", className: "LocalService", options: {}, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [], token: "LocalService_1a2b3c4d" },
     ]);
 
     const output = DecoratorWriter.write("class RootService {}\nclass LocalService {}", "services.ts")!;
@@ -246,8 +320,8 @@ describe("DecoratorWriter", () => {
 
   it("ɵpipe con name y pure (true por default, como Angular)", () => {
     MetadataStore.set("pipes.ts", [
-      { kind: "pipe", className: "UpperPipe", options: { name: "upper" }, constructorTokens: [], constructorImports: [] },
-      { kind: "pipe", className: "NowPipe", options: { name: "now", pure: false }, constructorTokens: [], constructorImports: [] },
+      { kind: "pipe", className: "UpperPipe", options: { name: "upper" }, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [] },
+      { kind: "pipe", className: "NowPipe", options: { name: "now", pure: false }, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [] },
     ]);
 
     const output = DecoratorWriter.write("class UpperPipe {}\nclass NowPipe {}", "pipes.ts")!;
@@ -277,7 +351,7 @@ describe("DecoratorWriter", () => {
     const removeClass = vi.fn();
     const on = vi.fn();
     const off = vi.fn();
-    const $element = { addClass, removeClass, on, off };
+    const $element = { addClass, removeClass, on, off, data: () => undefined };
 
     const watches: { watchFn: () => unknown; listenerFn: (value: unknown) => void; unwatch: () => void }[] = [];
     let destroyHandler: (() => void) | undefined;

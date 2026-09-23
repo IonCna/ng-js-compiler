@@ -16,13 +16,15 @@ describe("MetadataStore", () => {
       kind: "component",
       className: "CardComponent",
       options: { selector: "app-card" },
-      constructorTokens: [], constructorImports: [],
+      constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [],
       inputs: [],
       outputs: [],
       hostBindings: [],
       hostListeners: [],
       providers: [],
       lifecycleHooks: [],
+      queries: [],
+      hostDirectives: [],
     };
 
     MetadataStore.set("card.component.ts", [metadata]);
@@ -32,7 +34,7 @@ describe("MetadataStore", () => {
 
   it("no mezcla metadata entre paths distintos", () => {
     MetadataStore.set("a.ts", [
-      { kind: "component", className: "A", options: {}, constructorTokens: [], constructorImports: [], inputs: [], outputs: [], hostBindings: [], hostListeners: [], providers: [], lifecycleHooks: [] },
+      { kind: "component", className: "A", options: {}, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [], inputs: [], outputs: [], hostBindings: [], hostListeners: [], providers: [], lifecycleHooks: [], queries: [], hostDirectives: [] },
     ]);
 
     expect(MetadataStore.get("b.ts")).toEqual([]);
