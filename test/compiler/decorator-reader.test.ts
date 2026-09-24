@@ -234,6 +234,22 @@ describe("decoratorReaderTransform", () => {
       expect(metadata.constructorImports).toEqual(["ngjs-core/http"]);
     });
 
+    it("con type arguments (`inject(ElementRef<HTMLElement>)`): el token es la clase, el genérico se descarta", async () => {
+      const code = `
+        import { ElementRef, inject } from "ngjs-core";
+        @Directive({ selector: "[foo]" })
+        export class FooDirective {
+          private element = inject(ElementRef<HTMLElement>).nativeElement;
+        }
+      `;
+
+      const result = await decoratorReaderTransform.transform(code, "foo.directive.ts");
+      const [metadata] = MetadataStore.get("foo.directive.ts") as [ComponentMetadata];
+
+      expect(result).toContain('private element = globalThis.ɵngjsInjected["FooDirective"][0].nativeElement;');
+      expect(metadata.injectTokens).toEqual([{ token: TokenName.of("ElementRef", "ngjs-core"), flags: {} }]);
+    });
+
     it("lo que no corre durante la construcción queda intacto: función anidada, método, campo static", async () => {
       const code = `
         @Injectable()

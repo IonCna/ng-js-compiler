@@ -939,7 +939,9 @@ export class DecoratorReader {
 
     const [tokenArg, optionsArg, ...rest] = call.arguments;
     if (!tokenArg || tokenArg.spread || rest.length) fail("inject() recibe un token y, opcional, un objeto de opciones.");
-    const tokenExpr = DecoratorReader.unwrapForwardRef(tokenArg!.expression, context);
+    const unwrapped = DecoratorReader.unwrapForwardRef(tokenArg!.expression, context);
+    // `inject(ElementRef<HTMLElement>)` (instantiation expression, como en Angular): el token es `ElementRef`.
+    const tokenExpr = unwrapped.type === "TsInstantiation" ? unwrapped.expression : unwrapped;
     const token = DecoratorReader.tokenOf(tokenExpr, context) ?? fail("el token tiene que ser una clase, un InjectionToken o un string.");
 
     const flags: InjectFlags = {};
