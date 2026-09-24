@@ -2,6 +2,7 @@ import type { ApplicationNode } from "@/compiler/application-node.ts";
 import type { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
 import { ComponentBindings } from "@/compiler/component-bindings.ts";
+import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HashId } from "@/compiler/hash-id.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
@@ -43,9 +44,9 @@ export class ModuleWriter {
     const modules = MetadataStore.get(path).filter((metadata) => metadata.kind === "ngmodule");
     if (!modules.length) return undefined;
 
-    // Se estampa una sola vez, en el archivo del módulo raíz (el que tiene `bootstrap`) — y solo si algún
-    // component/directive del proyecto declaró `providers` propios (si no, no hay nada que resolver distinto
-    // de lo nativo). Ver `ScopedInjectorRuntime`.
+    // Se estampa en el archivo del módulo raíz (el que tiene `bootstrap`) si algún component/directive del proyecto
+    // declaró `providers` propios, y en cada módulo que DECLARA uno así (una librería compilada aparte lo trae
+    // sola). Se instala una sola vez por app aunque llegue de varios módulos. Ver `ScopedInjectorRuntime`.
     const needsScopedInjector = this.scanner.hasScopedProviders();
     let scopedInjectorEmitted = false;
     // Cada módulo registra `ɵresolve` si alguna dependencia del proyecto lleva flags (`@Optional()`, …) — ver `ResolveDependency`.
@@ -55,7 +56,7 @@ export class ModuleWriter {
       const node = this.scanner.get(metadata.className);
       if (!node) throw new Error(`ModuleWriter: "${metadata.className}" no está en el escaneo del proyecto (¿corrió ApplicationScanner.scan()?).`);
       const isRoot = (metadata as NgModuleMetadata).bootstrap.length > 0;
-      const attachScopedInjector = isRoot && needsScopedInjector;
+      const attachScopedInjector = (isRoot && needsScopedInjector) || ModuleWriter.declaresScopedProviders(node);
       scopedInjectorEmitted ||= attachScopedInjector;
       return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve);
     });
@@ -73,6 +74,12 @@ export class ModuleWriter {
       .map((source) => `${source}\n`)
       .join("");
     return `import ${ANGULAR} from "angular";\n${prelude}${code}\n${statements.join("\n")}\n`;
+  }
+
+  /** Declara algún `@Component`/`@Directive` con `providers` propios — ese módulo trae su injector por elemento. */
+  private static declaresScopedProviders(node: ApplicationNode): boolean {
+    const { components, directives } = node.declarations;
+    return [...components, ...directives].some((declared) => (declared.metadata as ComponentMetadata | DirectiveMetadata).providers.length > 0);
   }
 
   private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean, registerResolve: boolean): string {
@@ -93,8 +100,8 @@ export class ModuleWriter {
       ...ModuleWriter.providerCalls(node, id),
       ...(registerResolve ? [ResolveDependency.factoryFragment()] : []),
       ...(attachScopedInjector ? [ScopedInjectorRuntime.decoratorFragment()] : []),
-      ...node.declarations.components.flatMap(ModuleWriter.componentCall),
-      ...node.declarations.directives.flatMap(ModuleWriter.directiveCall),
+      ...node.declarations.components.flatMap((declared) => ModuleWriter.componentCall(declared, node.controllerAs)),
+      ...node.declarations.directives.flatMap((declared) => ModuleWriter.directiveCall(declared, node.controllerAs)),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),
       ...ModuleWriter.instanceCalls(node),
     ];
@@ -105,9 +112,14 @@ export class ModuleWriter {
     const chain = [head, ...chainCalls].join("\n  ");
     const evaluations = calls.map((call) => `const ${call.name} = ${call.expr};\n`).join("");
     // `ɵmod` como en Ivy — el id del `angular.module` (para que otro `@NgModule` lo importe por referencia) y los
-    // tags de `bootstrap` (los monta `bootstrapModule()` de la plataforma, ver `PlatformCode`).
+    // tags de `bootstrap` (los monta `bootstrapModule()` de la plataforma, ver `PlatformCode`) y el `controllerAs` del
+    // módulo (el runtime lo usa para componentes que no están en ningún `@NgModule`, como los de `loadComponent`).
     const bootstrap = ModuleWriter.bootstrapTags(node);
-    const mod = bootstrap.length ? `{ id: ${JSON.stringify(id)}, bootstrap: ${JSON.stringify(bootstrap)} }` : `{ id: ${JSON.stringify(id)} }`;
+    const mod = `{ ${[
+      `id: ${JSON.stringify(id)}`,
+      ...(bootstrap.length ? [`bootstrap: ${JSON.stringify(bootstrap)}`] : []),
+      ...(node.controllerAs !== undefined ? [`controllerAs: ${JSON.stringify(node.controllerAs)}`] : []),
+    ].join(", ")} }`;
     return `${evaluations}${node.className}.ɵmod = ${mod};\n${chain};`;
   }
 
@@ -124,7 +136,9 @@ export class ModuleWriter {
       if (alternatives.length !== 1 || alternatives[0]!.restrict !== "E") {
         throw new Error(`ModuleWriter: "${name}" (bootstrap) necesita un selector de elemento simple, no ${JSON.stringify(selector)}.`);
       }
-      return selector.trim();
+      // El tag que matchea AngularJS para ese nombre de registro: `nbKebabCamel` y `nb-kebab-camel` son el mismo
+      // componente, pero `document.createElement("nbKebabCamel")` crearía `<nbkebabcamel>`, que no matchea.
+      return alternatives[0]!.registrationName.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`);
     });
   }
 
@@ -223,7 +237,7 @@ export class ModuleWriter {
    * pero TODAS las alternativas se validan antes de deduplicar: si una alternativa inválida comparte nombre
    * con una válida, el dedupe la taparía y el error nunca saldría.
    */
-  private static componentCall(node: ApplicationNode): string[] {
+  private static componentCall(node: ApplicationNode, moduleControllerAs: string | undefined): string[] {
     // Con los inputs/outputs heredados de sus bases del proyecto (`ClassHierarchy`).
     const metadata = ClassHierarchy.effective(node.metadata as ComponentMetadata);
     const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
@@ -237,19 +251,16 @@ export class ModuleWriter {
       }
     }
 
-    const bindings = ComponentBindings.from(metadata.inputs, metadata.outputs);
-    const fields = [`controller: ${node.className}.ɵfac`];
-    if (options.template !== undefined) fields.push(`template: ${JSON.stringify(options.template)}`);
-    if (options.templateUrl !== undefined) fields.push(`templateUrl: ${JSON.stringify(options.templateUrl)}`);
-    fields.push(`controllerAs: ${JSON.stringify(options.controllerAs ?? "$ctrl")}`);
-    if (Object.keys(bindings).length) fields.push(`bindings: ${JSON.stringify(bindings)}`);
+    const definition = Object.entries(ComponentDefinition.fields(node.metadata as ComponentMetadata, moduleControllerAs));
+    const fields = [`controller: ${node.className}.ɵfac`, ...definition.map(([key, value]) => `${key}: ${JSON.stringify(value)}`)];
 
     return ModuleWriter.uniqueByName(alternatives).map(
       (parsed) => `.component(${JSON.stringify(parsed.registrationName)}, { ${fields.join(", ")} })`,
     );
   }
 
-  private static directiveCall(node: ApplicationNode): string[] {
+  /** El `controllerAs` del módulo solo aplica a una directiva CON template (su vista lo usa); si no, su nombre. */
+  private static directiveCall(node: ApplicationNode, moduleControllerAs: string | undefined): string[] {
     // Con los inputs/outputs heredados de sus bases del proyecto (`ClassHierarchy`).
     const metadata = ClassHierarchy.effective(node.metadata as DirectiveMetadata);
     const options = metadata.options as { selector?: string; template?: string; templateUrl?: string; controllerAs?: string };
@@ -264,10 +275,11 @@ export class ModuleWriter {
         `controller: ${node.className}.ɵfac`,
         `restrict: ${JSON.stringify(parsed.restrict)}`,
         `bindToController: ${Object.keys(bindings).length ? JSON.stringify(bindings) : "true"}`,
-        `controllerAs: ${JSON.stringify(options.controllerAs ?? parsed.registrationName)}`,
+        `controllerAs: ${JSON.stringify(options.controllerAs ?? (options.template !== undefined || options.templateUrl !== undefined ? moduleControllerAs : undefined) ?? parsed.registrationName)}`,
       ];
       if (options.template !== undefined) fields.push(`template: ${JSON.stringify(options.template)}`);
       if (options.templateUrl !== undefined) fields.push(`templateUrl: ${JSON.stringify(options.templateUrl)}`);
+      if (ComponentDefinition.projectsContent(options.template)) fields.push("transclude: true");
 
       return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${fields.join(", ")} }; })`;
     });

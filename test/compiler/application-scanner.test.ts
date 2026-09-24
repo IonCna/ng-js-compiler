@@ -215,7 +215,8 @@ export class FeatureModule {}
     const appModule = scanner.get("AppModule")!;
     expect(appModule.imports.map((n) => n.className)).toEqual(["FeatureModule"]);
     expect(appModule.legacyImports).toEqual([
-      "(legacyModule.ɵmod ? legacyModule.ɵmod.id : legacyModule.name)",
+      // Un string (el nombre), un @NgModule de otro paquete o un IModule: se decide al correr.
+      '(typeof legacyModule === "string" ? legacyModule : legacyModule.ɵmod ? legacyModule.ɵmod.id : legacyModule.name)',
       '"ngAnimate"',
       'angular.module("legacy.core").name',
     ]);

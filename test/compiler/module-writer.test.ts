@@ -163,6 +163,37 @@ export class CardComponent {
     expect(output).toContain('bindings: {"count":"<?","closed":"&?"}');
   });
 
+  it("un template con <ng-content> se registra con transclude: true (sin eso el contenido proyectado se pierde)", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+import { PanelComponent, PlainComponent } from "./panel.component.ts";
+
+@NgModule({ declarations: [PanelComponent, PlainComponent] })
+export class AppModule {}
+`,
+    );
+    await write(
+      join(dir, "panel.component.ts"),
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-panel", template: "<section><ng-content></ng-content></section>" })
+export class PanelComponent {}
+
+@Component({ selector: "app-plain", template: "<p>ng-content no es un tag acá</p>" })
+export class PlainComponent {}
+`,
+    );
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+    expect(output).toContain('.component("appPanel", { controller: PanelComponent.ɵfac, template: "<section><ng-content></ng-content></section>", controllerAs: "$ctrl", transclude: true })');
+    expect(output).toContain('.component("appPlain", { controller: PlainComponent.ɵfac, template: "<p>ng-content no es un tag acá</p>", controllerAs: "$ctrl" })');
+  });
+
   it("un @Component con selector de atributo tira error claro (no soportado todavía)", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(
@@ -297,14 +328,14 @@ export class AppModule {}
   });
 
   describe("bootstrap", () => {
-    async function writeApp(bootstrap: string, declarations: string): Promise<() => string> {
+    async function writeApp(bootstrap: string, declarations: string, extra = ""): Promise<() => string> {
       const modulePath = join(dir, "app.module.ts");
       await write(
         modulePath,
         `import { NgModule } from "ngjs-core";
 import { AppComponent } from "./app.component.ts";
 
-@NgModule({ declarations: ${declarations}, imports: [], bootstrap: ${bootstrap} })
+@NgModule({ declarations: ${declarations}, imports: [], bootstrap: ${bootstrap}${extra} })
 export class AppModule {}
 `,
       );
@@ -324,6 +355,11 @@ export class AppComponent {}
     it("ɵmod lleva los tags de bootstrap para que bootstrapModule() los monte", async () => {
       const output = (await writeApp("[AppComponent]", "[AppComponent]"))();
       expect(output).toMatch(/AppModule\.ɵmod = \{ id: "AppModule_[0-9a-f]{8}", bootstrap: \["app-root"\] \};/);
+    });
+
+    it("ɵmod lleva el controllerAs del módulo (fallback del runtime para componentes fuera de todo @NgModule)", async () => {
+      const output = (await writeApp("[AppComponent]", "[AppComponent]", ', controllerAs: "$"'))();
+      expect(output).toMatch(/AppModule\.ɵmod = \{ id: "AppModule_[0-9a-f]{8}", bootstrap: \["app-root"\], controllerAs: "\$" \};/);
     });
 
     it("un componente de bootstrap que no está en declarations es error, como en Angular", async () => {
@@ -402,7 +438,7 @@ export class AppComponent {}
       expect(output).not.toContain(".decorator(");
     });
 
-    it("un módulo sin bootstrap (no es el raíz) no recibe el .decorator, aunque haya providers en otro lado del proyecto", async () => {
+    it("un módulo que declara un componente con providers trae su propio .decorator (una librería compilada aparte funciona sola); uno que no declara ninguno y no es raíz, no", async () => {
       const appModulePath = join(dir, "app.module.ts");
       const featureModulePath = join(dir, "feature.module.ts");
       await write(
@@ -431,6 +467,9 @@ import { UserService } from "./user.service.ts";
 
 @NgModule({ declarations: [WidgetComponent], imports: [] })
 export class FeatureModule {}
+
+@NgModule({ imports: [] })
+export class EmptyModule {}
 `,
       );
       await write(
@@ -455,10 +494,12 @@ export class UserService {}
       await scanner.scan(dir);
       const writer = new ModuleWriter(scanner);
 
-      const featureOutput = writer.write("export class FeatureModule {}", featureModulePath)!;
+      const featureOutput = writer.write("export class FeatureModule {}\nexport class EmptyModule {}", featureModulePath)!;
       const appOutput = writer.write("export class AppModule {}", appModulePath)!;
 
-      expect(featureOutput).not.toContain(".decorator(");
+      const [featureChain, emptyChain] = featureOutput.split("EmptyModule.ɵmod");
+      expect(featureChain).toContain('.decorator("$controller"');
+      expect(emptyChain).not.toContain(".decorator(");
       expect(appOutput).toContain(".decorator(");
     });
   });

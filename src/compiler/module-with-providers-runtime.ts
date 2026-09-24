@@ -32,6 +32,7 @@ function ɵownFactory(cls) {
 }
 function ɵimportedModuleName(imported) {
   var module = imported && imported.ngModule ? imported.ngModule : imported;
+  if (typeof module === "string") return module;
   return module.ɵmod ? module.ɵmod.id : module.name;
 }
 function ɵregisterProvider(module, key, provider) {

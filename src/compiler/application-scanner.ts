@@ -1,10 +1,24 @@
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { ApplicationNode } from "@/compiler/application-node.ts";
 import { DecoratorReader } from "@/compiler/decorator-reader.ts";
+import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import type { ModuleImport, NgModuleMetadata, ProviderMetadata } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
+
+/**
+ * Lo que la emisión le hace a cada archivo ANTES de la cadena del compilador — el escaneo tiene que ver el mismo
+ * código: `ModuleWriter` registra desde la metadata del escaneo (un `@NgModule` se emite antes que los archivos que
+ * importa), así que si el escaneo leyera el archivo crudo, un `templateUrl` que `ng-js-vite` inlinea al emitir
+ * quedaría registrado como `templateUrl` relativo, y un environment reemplazado se escanearía con el original.
+ */
+export interface ScanOptions {
+  /** Transforms previos (`extraTransforms` de `pluginLoader`/`viteTransformPlugin`, ej. el template de `ng-js-vite`). */
+  transforms?: NgjsTransform[];
+  /** `fileReplacements`: ruta absoluta de `replace` → ruta absoluta de `with`. */
+  fileReplacements?: Record<string, string>;
+}
 
 /**
  * Compilador de dos pasadas: `scan()` recorre TODO `sourceRoot` antes de que
@@ -17,12 +31,18 @@ import { MetadataStore } from "@/metadata/metadata-store.ts";
 export class ApplicationScanner {
   private readonly nodes = new Map<string, ApplicationNode>();
 
-  /** Pasada 1 (lee todo) + pasada 2 (resuelve `declarations`/`imports` a nodos reales). */
-  async scan(sourceRoot: string): Promise<void> {
-    const files = await ApplicationScanner.listTsFiles(sourceRoot);
+  /**
+   * Pasada 1 (lee todo) + pasada 2 (resuelve `declarations`/`imports` a nodos reales). Varias raíces se escanean
+   * como un solo proyecto (ej. una app y el código fuente de una librería que compila junto con ella).
+   */
+  async scan(sourceRoot: string | string[], options: ScanOptions = {}): Promise<void> {
+    const roots = Array.isArray(sourceRoot) ? sourceRoot : [sourceRoot];
+    const files = (await Promise.all(roots.map((root) => ApplicationScanner.listTsFiles(root)))).flat();
 
-    for (const path of files) {
-      const code = await readFile(path, "utf8");
+    for (const file of files) {
+      // Mismo path con que lo lee la emisión (`pluginLoader`: el del reemplazo, si hay).
+      const path = options.fileReplacements?.[resolve(file)] ?? file;
+      const code = await ApplicationScanner.readTransformed(path, options);
       await DecoratorReader.read(code, path);
 
       for (const metadata of MetadataStore.get(path)) {
@@ -38,6 +58,16 @@ export class ApplicationScanner {
     }
 
     this.resolve();
+  }
+
+  /** El código que va a ver la emisión, con los transforms previos aplicados. */
+  private static async readTransformed(path: string, options: ScanOptions): Promise<string> {
+    let code = await readFile(path, "utf8");
+    for (const transform of options.transforms ?? []) {
+      const result = await transform.transform(code, path);
+      if (result !== undefined) code = result;
+    }
+    return code;
   }
 
   get(className: string): ApplicationNode | undefined {
@@ -83,6 +113,23 @@ export class ApplicationScanner {
   private resolve(): void {
     for (const node of this.nodes.values()) {
       if (node.metadata.kind === "ngmodule") this.resolveModule(node, node.metadata);
+    }
+    for (const node of this.nodes.values()) {
+      if (node.metadata.kind === "ngmodule" && node.metadata.controllerAs) this.inheritControllerAs(node, node.metadata.controllerAs);
+    }
+  }
+
+  /**
+   * `controllerAs` de `@NgModule` en 3 capas (lo que hacía el runtime de `ngjs-core`): el del `@Component` si lo
+   * declara; si no, el de su módulo; si el módulo tampoco, el del módulo que lo importa (hacia abajo por `imports`,
+   * sin pisar uno propio). Con dos importadores distintos gana el primero que se recorre.
+   */
+  private inheritControllerAs(node: ApplicationNode, controllerAs: string): void {
+    if (node.controllerAs !== undefined) return;
+    node.controllerAs = controllerAs;
+    for (const imported of node.imports) {
+      const own = (imported.metadata as NgModuleMetadata).controllerAs;
+      this.inheritControllerAs(imported, own ?? controllerAs);
     }
   }
 
@@ -130,9 +177,12 @@ export class ApplicationScanner {
     node.imports.push(own);
   }
 
-  /** `@NgModule` de otro paquete (`ɵmod.id`) o `IModule` legacy (`.name`) — `expr` es un identificador o acceso a miembro, sin efectos al repetirlo. */
+  /**
+   * `@NgModule` de otro paquete (`ɵmod.id`), `IModule` legacy (`.name`) o ya el nombre (`legacy.name`, un string) —
+   * `expr` es un identificador o acceso a miembro, sin efectos al repetirlo.
+   */
   private static externalModuleName(expr: string): string {
-    return `(${expr}.ɵmod ? ${expr}.ɵmod.id : ${expr}.name)`;
+    return `(typeof ${expr} === "string" ? ${expr} : ${expr}.ɵmod ? ${expr}.ɵmod.id : ${expr}.name)`;
   }
 
   /** Como Angular: `declarations` solo acepta component/directive/pipe — un servicio va en `providers`. */

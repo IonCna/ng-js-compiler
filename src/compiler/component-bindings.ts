@@ -1,6 +1,8 @@
 export interface BindingDef {
   propName: string;
   bindingName: string;
+  /** Solo inputs: `"@"` = `@Input({ binding: "@" })` (interpolación); sin valor, `<`. */
+  mode?: "@";
 }
 
 /**
@@ -14,11 +16,12 @@ export interface BindingDef {
  *   `@Input() count`        → `{ count: '<?' }`
  *   `@Input('data') items`  → `{ items: '<?data' }`
  *   `@Output() closed`      → `{ closed: '&?' }`
+ *   `@Input({ binding: "@" }) label` → `{ label: '@?' }`
  */
 export class ComponentBindings {
   static from(inputs: BindingDef[], outputs: BindingDef[]): Record<string, string> {
     const bindings: Record<string, string> = {};
-    for (const input of inputs) bindings[input.propName] = ComponentBindings.expr("<", input);
+    for (const input of inputs) bindings[input.propName] = ComponentBindings.expr(input.mode ?? "<", input);
     for (const output of outputs) bindings[output.propName] = ComponentBindings.expr("&", output);
     return bindings;
   }

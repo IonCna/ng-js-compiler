@@ -15,6 +15,7 @@ import type {
   PropertyName,
   Span,
   StringLiteral,
+  TemplateLiteral,
   TsParameterProperty,
 } from "@swc/core";
 import { TokenName } from "@/compiler/token-name.ts";
@@ -47,6 +48,8 @@ interface FileContext {
   path: string;
   code: string;
   imports: ImportMap;
+  /** Clases declaradas en el archivo (nivel superior) — un tipo de parámetro que no es import ni una de estas no es un token. */
+  localClasses: Set<string>;
 }
 
 /** Claves que acepta un provider objeto — cualquier otra es error (no se ignora en silencio). */
@@ -128,6 +131,11 @@ export class DecoratorReader {
     NumericLiteral: (expr) => (expr as NumericLiteral).value,
     BooleanLiteral: (expr) => (expr as BooleanLiteral).value,
     NullLiteral: () => null,
+    // `template: \`...\`` — solo sin interpolaciones (`${}` no se puede resolver estáticamente).
+    TemplateLiteral: (expr) => {
+      const tpl = expr as TemplateLiteral;
+      return tpl.expressions.length === 0 ? (tpl.quasis[0]?.cooked ?? tpl.quasis[0]?.raw) : undefined;
+    },
     ArrayExpression: (expr) =>
       (expr as ArrayExpression).elements.map((el) => (el ? DecoratorReader.literalValue(el.expression) : undefined)),
     ObjectExpression: (expr) => DecoratorReader.objectLiteralValue(expr as ObjectExpression),
@@ -140,7 +148,7 @@ export class DecoratorReader {
 
     const ast = await parse(code, { syntax: "typescript", decorators: true, target: "es2022" });
 
-    const context: FileContext = { path, code, imports: DecoratorReader.readImports(ast.body) };
+    const context: FileContext = { path, code, imports: DecoratorReader.readImports(ast.body, path), localClasses: DecoratorReader.localClasses(ast.body) };
     const metadata: DecoratorMetadata[] = [];
     const stripSpans: SourceEdit[] = [];
     for (const item of ast.body) {
@@ -173,12 +181,12 @@ export class DecoratorReader {
   }
 
   /** `import { A as B } from "./x"` → `B → { symbol: "A", packageName: undefined }`; default/namespace no aplican (no son un símbolo con nombre). */
-  private static readImports(body: ModuleItem[]): ImportMap {
+  private static readImports(body: ModuleItem[], path: string): ImportMap {
     const imports: ImportMap = new Map();
 
     for (const item of body) {
       if (item.type !== "ImportDeclaration") continue;
-      const packageName = TokenName.packageFromSpecifier(item.source.value);
+      const packageName = TokenName.packageFromSpecifier(item.source.value, path);
 
       for (const specifier of item.specifiers) {
         if (specifier.type !== "ImportSpecifier") continue;
@@ -188,6 +196,10 @@ export class DecoratorReader {
     }
 
     return imports;
+  }
+
+  private static localClasses(body: ModuleItem[]): Set<string> {
+    return new Set(body.flatMap((item) => DecoratorReader.unwrapClassDeclaration(item)?.identifier.value ?? []));
   }
 
   /** Identificador local → nombre de DI: por su import si viene de otro archivo, si no declarado acá (mismo paquete). */
@@ -540,7 +552,7 @@ export class DecoratorReader {
    * reemplazados (`InjectedValues.ref`) — misma lectura que un `useFactory`, resolviendo tokens con los imports de `body`.
    */
   static tokenFactory(expr: Expression, owner: string, code: string, path: string, body: ModuleItem[]): { text: string; injectTokens: InjectDep[] } {
-    return DecoratorReader.factorySource(expr, owner, { path, code, imports: DecoratorReader.readImports(body) });
+    return DecoratorReader.factorySource(expr, owner, { path, code, imports: DecoratorReader.readImports(body, path), localClasses: DecoratorReader.localClasses(body) });
   }
 
   /** `source()` con los `edits` que caen adentro de `node` aplicados (offsets relativos al nodo). */
@@ -601,13 +613,7 @@ export class DecoratorReader {
             stripSpans.push(decorator.span);
             continue;
           }
-          const args = DecoratorReader.decoratorArgs(decorator);
-          const override = typeof args[0] === "string" ? args[0] : name;
-          const decoratorName = DecoratorReader.decoratorCallName(decorator);
-          const handler = decoratorName ? DecoratorReader.PROPERTY_BINDING_HANDLERS[decoratorName] : undefined;
-          if (!handler) continue;
-          handler(bindings, name, override);
-          stripSpans.push(decorator.span);
+          if (DecoratorReader.readPropertyBinding(decorator, bindings, name, owner)) stripSpans.push(decorator.span);
         }
       }
 
@@ -625,6 +631,11 @@ export class DecoratorReader {
             stripSpans.push(decorator.span);
             continue;
           }
+          // `@Input() set value(v)` / `@HostBinding("class.x") get isX()` — un accessor es un binding como un campo.
+          if ((member.kind === "getter" || member.kind === "setter") && DecoratorReader.readPropertyBinding(decorator, bindings, name, owner)) {
+            stripSpans.push(decorator.span);
+            continue;
+          }
           if (DecoratorReader.decoratorCallName(decorator) !== "HostListener") continue;
           const [eventName, args] = DecoratorReader.decoratorArgs(decorator);
           bindings.hostListeners.push({
@@ -638,6 +649,41 @@ export class DecoratorReader {
     }
 
     return bindings;
+  }
+
+  /**
+   * `@Input`/`@Output`/`@HostBinding` sobre `name` (campo o accessor). `false` si el decorador no es ninguno de los
+   * tres. `@Input`/`@Output` aceptan el alias como string o como objeto (`{ alias, required, binding }`), como en
+   * Angular; `binding: "@"` es el binding de interpolación de AngularJS. `transform` no se puede aplicar en build
+   * (es una función): error, no se ignora.
+   */
+  private static readPropertyBinding(decorator: Decorator, bindings: ClassBindings, name: string, owner: string): boolean {
+    const decoratorName = DecoratorReader.decoratorCallName(decorator);
+    const handler = decoratorName ? DecoratorReader.PROPERTY_BINDING_HANDLERS[decoratorName] : undefined;
+    if (!handler) return false;
+
+    const [first] = DecoratorReader.decoratorArgs(decorator);
+    if (typeof first === "string" || first === undefined) {
+      handler(bindings, name, first ?? name);
+      return true;
+    }
+    const fail = (reason: string): never => {
+      throw new Error(`DecoratorReader: "${owner}.${name}" — @${decoratorName}: ${reason}`);
+    };
+    if (decoratorName === "HostBinding" || typeof first !== "object" || first === null || Array.isArray(first)) {
+      return fail("el argumento tiene que ser un string literal" + (decoratorName === "HostBinding" ? "." : " o un objeto de opciones literal."));
+    }
+    const options = first as Record<string, unknown>;
+    const allowed = decoratorName === "Input" ? ["alias", "required", "binding", "transform"] : ["alias"];
+    for (const key of Object.keys(options)) if (!allowed.includes(key)) fail(`opción "${key}" desconocida.`);
+    if ("transform" in options) fail("`transform` no está soportado (una función no se puede aplicar en build) — transformá el valor en un setter.");
+    if (options.alias !== undefined && typeof options.alias !== "string") fail("`alias` tiene que ser un string literal.");
+    if (options.required !== undefined && typeof options.required !== "boolean") fail("`required` tiene que ser true/false literal.");
+    if (options.binding !== undefined && options.binding !== "<" && options.binding !== "@") fail('`binding` tiene que ser "<" o "@".');
+
+    handler(bindings, name, (options.alias as string | undefined) ?? name);
+    if (options.binding === "@") bindings.inputs[bindings.inputs.length - 1]!.mode = "@";
+    return true;
   }
 
   /**
@@ -934,6 +980,13 @@ export class DecoratorReader {
     if (typeAnnotation?.type !== "TsTypeReference" || typeAnnotation.typeName.type !== "Identifier") return undefined;
 
     const local = typeAnnotation.typeName.value;
+    // Un tipo que no se importa ni se declara acá es global (`Window`, `Document`, `HTMLElement`): no es una clase
+    // provista, y como token daría un nombre que nadie registra. Como en Angular, hace falta `@Inject(TOKEN)`.
+    if (!context.imports.has(local) && !context.localClasses.has(local)) {
+      throw new Error(
+        `DecoratorReader: el tipo "${local}" de un parámetro del constructor no es una clase importada ni declarada en el archivo — no hay token de DI; usá @Inject(TOKEN) (ej. @Inject(DOCUMENT) o @Inject("$window")).`,
+      );
+    }
     return { name: DecoratorReader.diName(local, context), local };
   }
 

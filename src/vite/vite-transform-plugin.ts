@@ -14,7 +14,7 @@ import type { Plugin } from "vite";
  * ve los tipos de los parámetros del constructor (tokens de DI de `ɵfac`).
  */
 export function viteTransformPlugin(
-  sourceRoot: string,
+  sourceRoot: string | string[],
   extraTransforms: NgjsTransform[] = [],
   projectType: ProjectType = "application",
 ): Plugin {
@@ -25,7 +25,7 @@ export function viteTransformPlugin(
     enforce: "pre",
     async buildStart() {
       const scanner = new ApplicationScanner();
-      await scanner.scan(sourceRoot);
+      await scanner.scan(sourceRoot, { transforms: extraTransforms });
       transforms = [...extraTransforms, ...createNgjsCompilerTransforms(scanner)];
     },
     // La plataforma (`globalThis.ɵngjsPlatform`) antes que los `<script type="module">` de la app — solo en una

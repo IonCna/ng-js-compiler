@@ -162,6 +162,29 @@ describe("ScopedInjectorRuntime", () => {
       node.resolve("x");
       expect(calls).toBe(2);
     });
+
+    it("destroy(): llama ngOnDestroy de las instancias que creó el nodo (no de un useValue/useExisting)", () => {
+      const { Node } = evaluate();
+      const destroyed: string[] = [];
+      const make = (name: string) => ({ ngOnDestroy: () => destroyed.push(name) });
+      const node = new Node(
+        [
+          { token: "a", kind: "useFactory", factory: () => make("a"), deps: [] },
+          { token: "m", kind: "useFactory", factory: () => make("m1"), deps: [], multi: true },
+          { token: "m", kind: "useFactory", factory: () => make("m2"), deps: [], multi: true },
+          { token: "v", kind: "useValue", value: make("v") },
+          { token: "alias", kind: "useExisting", existing: "a" },
+          { token: "unused", kind: "useFactory", factory: () => make("unused"), deps: [] },
+        ],
+        undefined,
+        {},
+      );
+      for (const token of ["a", "m", "v", "alias"]) node.resolve(token);
+
+      node.destroy();
+
+      expect(destroyed).toEqual(["a", "m1", "m2"]);
+    });
   });
 
   describe("ɵscopedController (el .decorator(\"$controller\", ...))", () => {
@@ -251,6 +274,24 @@ describe("ScopedInjectorRuntime", () => {
       ) as { Foo_hash: unknown };
 
       expect(locals.Foo_hash).toBe("from-other-bridge");
+    });
+
+    it("lo que ningún nodo provee no se resuelve acá: sigue al $controller de adentro (que puede agregarlo a locals)", () => {
+      const { scopedController } = evaluate();
+      // El de adentro agrega un token por instancia (como `ElementRef` en los bridges de ngjs-core).
+      const $delegate = vi.fn((_expr, locals) => ({ ...locals, ElementRef_hash: "per-instance" }));
+      const $injector = { get: vi.fn(() => { throw new Error("Unknown provider"); }), has: () => false };
+      const decorated = scopedController($delegate, $injector);
+
+      const expression = Object.assign(["Foo_hash", "ElementRef_hash", function Factory() {}], {
+        ɵproviders: [{ token: "Foo_hash", kind: "useValue", value: "from-node" }],
+      });
+
+      const locals = decorated(expression, { $element: fakeElement(), $scope: { $on: () => {} } }, false, undefined) as Record<string, unknown>;
+
+      expect(locals.Foo_hash).toBe("from-node");
+      expect(locals.ElementRef_hash).toBe("per-instance");
+      expect($injector.get).not.toHaveBeenCalled();
     });
   });
 });

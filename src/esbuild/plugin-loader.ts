@@ -19,7 +19,7 @@ import type { Plugin } from "esbuild";
  * cualquier otro.
  */
 export function pluginLoader(
-  sourceRoot: string,
+  sourceRoot: string | string[],
   extraTransforms: NgjsTransform[] = [],
   fileReplacements: Record<string, string> = {},
   projectType: ProjectType = "application",
@@ -42,13 +42,24 @@ export function pluginLoader(
         if (build.initialOptions.target === undefined) build.initialOptions.target = "es2016";
       }
 
+      // Si el escaneo falla no hay grafo: se corta ahí con ESE error, en vez de seguir cargando TypeScript crudo
+      // como JS (lo que taparía el error real con uno de sintaxis por archivo).
+      let scanFailed = false;
       build.onStart(async () => {
-        const scanner = new ApplicationScanner();
-        await scanner.scan(sourceRoot);
-        transforms = [...extraTransforms, ...createNgjsCompilerTransforms(scanner)];
+        scanFailed = false;
+        try {
+          const scanner = new ApplicationScanner();
+          await scanner.scan(sourceRoot, { transforms: extraTransforms, fileReplacements });
+          transforms = [...extraTransforms, ...createNgjsCompilerTransforms(scanner)];
+        } catch (error) {
+          scanFailed = true;
+          return { errors: [{ text: error instanceof Error ? error.message : String(error) }] };
+        }
+        return undefined;
       });
 
       build.onLoad({ filter: /\.ts$/ }, async (args) => {
+        if (scanFailed) return { contents: "", loader: "js" };
         const path = fileReplacements[args.path] ?? args.path;
         let code = await readFile(path, "utf8");
 

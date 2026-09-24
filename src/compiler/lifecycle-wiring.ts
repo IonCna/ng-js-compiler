@@ -23,8 +23,10 @@ export class LifecycleWiring {
     if (has("ngOnInit")) statements.push(`${className}.prototype.$onInit = function () { this.ngOnInit(); };`);
     if (has("ngOnDestroy")) statements.push(`${className}.prototype.$onDestroy = function () { this.ngOnDestroy(); };`);
     if (has("ngOnChanges")) statements.push(LifecycleWiring.onChangesStatement(className, inputs));
-    if (has("ngAfterContentInit") || has("ngAfterViewInit")) {
-      statements.push(LifecycleWiring.postLinkStatement(className, has("ngAfterContentInit"), has("ngAfterViewInit")));
+    const checked = has("ngAfterContentChecked") || has("ngAfterViewChecked");
+    // Con algún "Checked" también hace falta `$postLink`: marca que ya pasaron los "Init" (ver `doCheckStatement`).
+    if (has("ngAfterContentInit") || has("ngAfterViewInit") || checked) {
+      statements.push(LifecycleWiring.postLinkStatement(className, has("ngAfterContentInit"), has("ngAfterViewInit"), checked));
     }
     if (has("ngDoCheck") || has("ngAfterContentChecked") || has("ngAfterViewChecked")) {
       statements.push(
@@ -34,11 +36,23 @@ export class LifecycleWiring {
     return statements;
   }
 
-  /** Orden real de Angular: `AfterContentInit` antes que `AfterViewInit`. `$postLink` corre una sola vez, como los dos "Init". */
-  private static postLinkStatement(className: string, content: boolean, view: boolean): string {
-    const calls = [content && "this.ngAfterContentInit();", view && "this.ngAfterViewInit();"].filter(Boolean).join(" ");
+  /**
+   * Orden real de Angular: `AfterContentInit` antes que `AfterViewInit`. `$postLink` corre una sola vez, como los dos
+   * "Init"; con hooks "Checked", marca la instancia para que `$doCheck` empiece a llamarlos desde acá.
+   */
+  private static postLinkStatement(className: string, content: boolean, view: boolean, markInitialized: boolean): string {
+    const calls = [
+      content && "this.ngAfterContentInit();",
+      view && "this.ngAfterViewInit();",
+      markInitialized && `this.${LifecycleWiring.INITIALIZED} = true;`,
+    ]
+      .filter(Boolean)
+      .join(" ");
     return `${className}.prototype.$postLink = function () { ${calls} };`;
   }
+
+  /** Marca de instancia: ya corrió `$postLink` (los "Init"). */
+  private static readonly INITIALIZED = "ɵngjsViewInitialized";
 
   /**
    * `$doCheck` es el único hook de AngularJS que corre en cada digest — de ahí cuelgan también los que no
@@ -47,13 +61,15 @@ export class LifecycleWiring {
    * por cada pasada INTERNA del loop de `$digest` (no una vez por digest "lógico"), así que encolar algo en
    * `$evalAsync` desde ahí deja la cola async no vacía al final de cada pasada para siempre — el digest
    * nunca estabiliza y AngularJS aborta con "$digest() iterations reached" a las 10 vueltas. Probado.
+   *
+   * Como en Angular, los "Checked" arrancan DESPUÉS de su "Init": el primer `$doCheck` (en el link, antes de
+   * `$postLink`) solo llama `ngDoCheck`.
    */
   private static doCheckStatement(className: string, doCheck: boolean, contentChecked: boolean, viewChecked: boolean): string {
-    const calls = [
-      doCheck && "this.ngDoCheck();",
-      contentChecked && "this.ngAfterContentChecked();",
-      viewChecked && "this.ngAfterViewChecked();",
-    ]
+    const checked = [contentChecked && "this.ngAfterContentChecked();", viewChecked && "this.ngAfterViewChecked();"]
+      .filter(Boolean)
+      .join(" ");
+    const calls = [doCheck && "this.ngDoCheck();", checked && `if (this.${LifecycleWiring.INITIALIZED}) { ${checked} }`]
       .filter(Boolean)
       .join(" ");
 
@@ -65,13 +81,16 @@ export class LifecycleWiring {
    * método (compatible con las dos formas de leerlo en Angular real, para cuando migren de verdad). Cada
    * input en su propia IIFE — `c` no puede ser una variable compartida entre inputs: la closure de
    * `isFirstChange` la capturaría por referencia y todas terminarían viendo el último valor asignado.
+   *
+   * AngularJS también indexa `changesObj` por la clave de `bindings` (`propName`, ver `ComponentBindings`),
+   * no por el nombre del atributo: `@Input("aka") alias` llega como `changesObj.alias`.
    */
   private static onChangesStatement(className: string, inputs: Inputs): string {
     const entries = inputs
       .map(
-        ({ propName, bindingName }) => `
+        ({ propName }) => `
     (function () {
-      var c = changesObj[${JSON.stringify(bindingName)}];
+      var c = changesObj[${JSON.stringify(propName)}];
       if (!c) return;
       changes[${JSON.stringify(propName)}] = { previousValue: c.previousValue, currentValue: c.currentValue, firstChange: c.isFirstChange(), isFirstChange: function () { return c.isFirstChange(); } };
     })();`,

@@ -171,15 +171,19 @@ describe("DecoratorWriter", () => {
     ]);
 
     const output = DecoratorWriter.write("class SomeService {}\nclass CardComponent {}", "card.ts")!;
-    const CardComponent = evaluate(output, "CardComponent") as { ɵcmp: unknown; ɵfac: { ɵproviders?: unknown } };
+    const CardComponent = evaluate(output, "CardComponent") as { ɵcmp: unknown; ɵfac: { ɵproviders?: unknown; ɵtype?: unknown } };
 
     expect(CardComponent.ɵcmp).toEqual({
       selectors: [["app-card"]],
       inputs: { title: "title", aka: "alias" },
       outputs: { closed: "closed" },
       exportAs: ["card"],
+      // Lo de `.component()` (sin `controller`): para registrarlo al vuelo, fuera de un `@NgModule`.
+      definition: { templateUrl: "./card.html", bindings: { title: "<?", alias: "<?aka", closed: "&?" } },
     });
     expect(CardComponent.ɵfac.ɵproviders).toEqual([{ token: "SomeService_1a2b3c4d", kind: "class", ctor: expect.any(Function) }]);
+    // La clase colgada del array de `$controller` (el `type` de Ivy).
+    expect(CardComponent.ɵfac.ɵtype).toBe(CardComponent);
     expect(output).not.toContain("$name");
     expect(output).not.toContain("$inject");
   });
@@ -195,10 +199,13 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class HighlightDirective {}", "highlight.ts")!;
 
     expect(output).not.toContain("ɵcmp");
-    expect((evaluate(output, "HighlightDirective").ɵdir as { selectors: unknown }).selectors).toEqual([
+    const def = evaluate(output, "HighlightDirective").ɵdir as { selectors: unknown; definition: unknown };
+    expect(def.selectors).toEqual([
       ["", "appHighlight", ""],
       ["button", "type", "submit"],
     ]);
+    // Lo que no sale del selector, para registrarla al vuelo (sin inputs/outputs ni template: vacío).
+    expect(def.definition).toEqual({});
   });
 
   it("selector compuesto (tag[atributo]): el factory guarda el tag, avisa en consola y devuelve un objeto vacío si no matchea — el constructor real nunca corre", () => {

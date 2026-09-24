@@ -3,6 +3,8 @@ import type { BindingsMetadata } from "@/metadata/decorator-metadata.ts";
 type HostBinding = BindingsMetadata["hostBindings"][number];
 type HostListener = BindingsMetadata["hostListeners"][number];
 type ParsedHostProperty = { kind: "class" | "attr" | "style" | "prop"; name: string; unit?: string };
+/** Dónde escucha un `@HostListener`: el host, o un target global (`"window:resize"`). */
+type ListenerTarget = "host" | "window" | "document" | "body";
 
 /**
  * Traduce `@HostBinding`/`@HostListener` (ya leídos por `DecoratorReader`) al cuerpo del factory
@@ -49,22 +51,82 @@ export class HostWiring {
    * "$digest already in progress" — en ese caso se llama directo, el digest en curso ya lo recoge.
    */
   private static listenerStatement(listener: HostListener, index: number): string {
+    const parsed = HostWiring.parseEventName(listener.eventName);
     const args = listener.args.map((arg) => arg.replace(/^\$event/, "event")).join(", ");
     const call = `instance.${listener.methodName}(${args});`;
     return [
       `var ɵhandler${index} = function (event) {`,
+      parsed.key ? `  if (!${HostWiring.keyMatchExpr(parsed.key, parsed.modifiers)}) return;` : "",
       `  var ɵphase = $scope.$root.$$phase;`,
       `  if (ɵphase === "$apply" || ɵphase === "$digest") { ${call} }`,
       `  else { $scope.$apply(function () { ${call} }); }`,
       `};`,
-      `$element.on(${JSON.stringify(listener.eventName)}, ɵhandler${index});`,
-    ].join("\n");
+      `${HostWiring.onExpr(parsed.target, "on")}(${JSON.stringify(parsed.event)}, ɵhandler${index});`,
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   private static destroyStatement(unwatchNames: string[], listeners: HostListener[], handlerNames: string[]): string {
     const unwatchCalls = unwatchNames.map((name) => `${name}();`);
-    const offCalls = listeners.map((listener, index) => `$element.off(${JSON.stringify(listener.eventName)}, ${handlerNames[index]});`);
+    const offCalls = listeners.map((listener, index) => {
+      const parsed = HostWiring.parseEventName(listener.eventName);
+      return `${HostWiring.onExpr(parsed.target, "off")}(${JSON.stringify(parsed.event)}, ${handlerNames[index]});`;
+    });
     return `$scope.$on("$destroy", function () { ${[...unwatchCalls, ...offCalls].join(" ")} });`;
+  }
+
+  /**
+   * Como Angular: `"window:resize"`/`"document:click"`/`"body:scroll"` escuchan en ese target global (y se sacan en
+   * `$destroy`: si no, quedarían vivos después del elemento); `"keydown.enter"`/`"keyup.shift.tab"` filtran por tecla
+   * y modificadores (solo en eventos de teclado). Sin prefijo, el propio host.
+   */
+  private static parseEventName(eventName: string): { target: ListenerTarget; event: string; key?: string; modifiers: string[] } {
+    const targetMatch = /^(window|document|body):(.+)$/.exec(eventName);
+    const target = (targetMatch?.[1] as ListenerTarget | undefined) ?? "host";
+    const [event, ...parts] = (targetMatch?.[2] ?? eventName).split(".");
+    if (!parts.length) return { target, event: event!, modifiers: [] };
+    if (event !== "keydown" && event !== "keyup") {
+      throw new Error(`HostWiring: @HostListener(${JSON.stringify(eventName)}) — el filtro por tecla solo existe en keydown/keyup.`);
+    }
+    const key = parts.pop()!.toLowerCase();
+    const modifiers = parts.map((part) => (part.toLowerCase() === "ctrl" ? "control" : part.toLowerCase()));
+    for (const modifier of modifiers) {
+      if (!HostWiring.MODIFIERS.includes(modifier)) {
+        throw new Error(`HostWiring: @HostListener(${JSON.stringify(eventName)}) — modificador "${modifier}" desconocido (alt/control/meta/shift).`);
+      }
+    }
+    return { target, event: event!, key: HostWiring.KEY_ALIASES[key] ?? key, modifiers };
+  }
+
+  private static readonly MODIFIERS = ["alt", "control", "meta", "shift"];
+
+  /** Nombres de Angular para teclas cuyo `event.key` no es la palabra (`"space"` → `" "`). */
+  private static readonly KEY_ALIASES: Record<string, string> = {
+    space: " ",
+    dot: ".",
+    esc: "escape",
+    del: "delete",
+    up: "arrowup",
+    down: "arrowdown",
+    left: "arrowleft",
+    right: "arrowright",
+  };
+
+  /** La tecla (sin distinguir mayúsculas) con EXACTAMENTE esos modificadores apretados, como Angular. */
+  private static keyMatchExpr(key: string, modifiers: string[]): string {
+    const flags = HostWiring.MODIFIERS.map((modifier) => {
+      const property = modifier === "control" ? "ctrlKey" : `${modifier}Key`;
+      return `${modifiers.includes(modifier) ? "" : "!"}event.${property}`;
+    });
+    return `(String(event.key).toLowerCase() === ${JSON.stringify(key)} && ${flags.join(" && ")})`;
+  }
+
+  /** `$element.on`/`.off` en el host; `addEventListener`/`removeEventListener` nativo en un target global. */
+  private static onExpr(target: ListenerTarget, action: "on" | "off"): string {
+    if (target === "host") return `$element.${action}`;
+    const object = target === "body" ? "document.body" : target;
+    return `${object}.${action === "on" ? "addEventListener" : "removeEventListener"}`;
   }
 
   /**
@@ -86,7 +148,10 @@ export class HostWiring {
     return fail();
   }
 
-  /** Semántica de Angular real: `attr.X` con `null`/`false` quita el atributo, `true` lo deja vacío. */
+  /**
+   * Semántica de Angular real: `attr.X` con `null`/`undefined` quita el atributo; cualquier otro valor se escribe como
+   * string (`false` → `"false"`, lo que necesita un `aria-expanded`).
+   */
   private static applyExpr(parsed: ParsedHostProperty, valueVar: string): string {
     const name = JSON.stringify(parsed.name);
 
@@ -94,7 +159,7 @@ export class HostWiring {
       case "class":
         return `${valueVar} ? $element.addClass(${name}) : $element.removeClass(${name})`;
       case "attr":
-        return `${valueVar} == null || ${valueVar} === false ? $element.removeAttr(${name}) : $element.attr(${name}, ${valueVar} === true ? "" : ${valueVar})`;
+        return `${valueVar} == null ? $element.removeAttr(${name}) : $element.attr(${name}, String(${valueVar}))`;
       case "style": {
         const unit = JSON.stringify(parsed.unit ?? "");
         return `${valueVar} == null ? $element.css(${name}, "") : $element.css(${name}, ${valueVar} + ${unit})`;

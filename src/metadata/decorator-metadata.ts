@@ -88,7 +88,8 @@ export type ProviderMetadata =
   | { kind: "useExisting"; token: string; existingToken: string; multi: boolean };
 
 export interface BindingsMetadata {
-  inputs: { propName: string; bindingName: string }[];
+  /** `mode: "@"` = `@Input({ binding: "@" })`, binding de interpolación de AngularJS; sin `mode`, `<`. */
+  inputs: { propName: string; bindingName: string; mode?: "@" }[];
   outputs: { propName: string; bindingName: string }[];
   hostBindings: { propName: string; hostProperty: string }[];
   /**

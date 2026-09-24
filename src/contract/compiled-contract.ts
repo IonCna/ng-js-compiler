@@ -44,6 +44,8 @@ export type CompiledFactory<T = unknown> = Annotation<T> & {
   ɵproviders?: ScopedProviderDescriptor[];
   /** Presente en los `@Component` (no en las `@Directive`). */
   ɵcomponent?: true;
+  /** En `@Component`/`@Directive`: la clase que construye (el `type` de Ivy) — `$controller` recibe este array, no la clase. */
+  ɵtype?: CompiledClass<T>;
 };
 
 /** Una receta de `ɵfac.ɵproviders` (providers de `@Component`/`@Directive`). */
@@ -114,6 +116,11 @@ export interface DirectiveDef {
   /** De vista (`@ViewChild`/`@ViewChildren`). */
   viewQueries?: QueryDef[];
   hostDirectives?: HostDirectiveDef[];
+  /**
+   * Para registrarla al vuelo (fuera de un `@NgModule`): en `ɵcmp`, el objeto de `.component()` sin `controller`; en
+   * `ɵdir`, lo que no sale del selector (`bindings`, template, `controllerAs` explícito).
+   */
+  definition?: Record<string, unknown>;
 }
 
 export type ComponentDef = DirectiveDef;
@@ -124,10 +131,12 @@ export interface PipeDef {
   pure: boolean;
 }
 
-/** `ClassName.ɵmod`: el id del `angular.module` que registró el build y los tags de `bootstrap`. */
+/** `ClassName.ɵmod`: el id del `angular.module` que registró el build, los tags de `bootstrap` y su `controllerAs`. */
 export interface NgModuleDef {
   id: string;
   bootstrap?: string[];
+  /** El `controllerAs` por defecto del módulo (propio o heredado), si tiene. */
+  controllerAs?: string;
 }
 
 /** Una clase tal como la deja el build (los campos presentes dependen de su decorador). */
@@ -175,6 +184,8 @@ declare global {
   var ɵngjsInjector: auto.IInjectorService | undefined;
   /** Initializadores registrados por `provideAppInitializer()` antes del bootstrap. */
   var ɵngjsAppInitializers: ((injector: auto.IInjectorService) => void | Promise<unknown>)[] | undefined;
+  /** `> 0` mientras corre `NgZone.runOutsideAngular()`: lo que se programe ahí no dispara digest (los patches). */
+  var ɵngjsOutsideAngular: number | undefined;
   /** Valores de los `inject()` de construcción, por clase dueña — solo mientras corre un factory. */
   var ɵngjsInjected: Record<string, unknown[]> | undefined;
 }

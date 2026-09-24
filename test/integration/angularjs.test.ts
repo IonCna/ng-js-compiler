@@ -1049,6 +1049,56 @@ export class AppModule {}
     expect(controller.clicks).toBe(1);
   });
 
+  it("@HostListener con target global (window:/document:) y filtro de tecla (keydown.enter / keydown.shift.tab)", async () => {
+    await write(
+      "keys.component.ts",
+      `import { Component, HostListener } from "ngjs-core";
+
+@Component({ selector: "app-keys", template: "" })
+export class KeysComponent {
+  seen: string[] = [];
+
+  @HostListener("window:resize") onResize(): void { this.seen.push("resize"); }
+  @HostListener("document:click", ["$event.type"]) onDocClick(type: string): void { this.seen.push("doc:" + type); }
+  @HostListener("keydown.enter") onEnter(): void { this.seen.push("enter"); }
+  @HostListener("keydown.shift.tab") onShiftTab(): void { this.seen.push("shift+tab"); }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { KeysComponent } from "./keys.component";
+
+@NgModule({ declarations: [KeysComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";
+`);
+
+    const { dom, angular, injector } = await bootstrap(`<app-keys></app-keys>`);
+    const { window } = dom;
+    const el = window.document.querySelector("app-keys")!;
+    const controller = angular.element(el).controller("appKeys") as { seen: string[] };
+
+    window.dispatchEvent(new window.Event("resize"));
+    window.document.dispatchEvent(new window.MouseEvent("click"));
+    el.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter" }));
+    el.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", ctrlKey: true })); // modificador de más: no
+    el.dispatchEvent(new window.KeyboardEvent("keydown", { key: "a" }));
+    el.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Tab", shiftKey: true }));
+    el.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Tab" })); // falta shift: no
+
+    expect(controller.seen).toEqual(["resize", "doc:click", "enter", "shift+tab"]);
+
+    // Los listeners globales se sacan en $destroy (si no, sobrevivirían al elemento).
+    injector.get<{ $destroy(): void }>("$rootScope").$destroy();
+    window.dispatchEvent(new window.Event("resize"));
+    window.document.dispatchEvent(new window.MouseEvent("click"));
+    expect(controller.seen).toHaveLength(4);
+  });
+
   it("providers de @Component: injector jerárquico por elemento — aísla instancias entre hermanos y las comparte con sus descendientes", async () => {
     await write(
       "logger.ts",
@@ -1117,6 +1167,53 @@ export class AppModule {}
     expect(childId(widgets[1]!)).toBe(ownId(widgets[1]!));
   });
 
+  it("providers de @Component en un módulo importado (como una librería): el injector por elemento se instala UNA vez aunque lo traigan varios módulos", async () => {
+    await write(
+      "counter.ts",
+      `import { Injectable } from "ngjs-core";
+
+let created = 0;
+@Injectable()
+export class Counter { readonly id = ++created; }
+`,
+    );
+    await write(
+      "widget.module.ts",
+      `import { Component, NgModule } from "ngjs-core";
+import { Counter } from "./counter";
+
+@Component({ selector: "lib-widget", template: "", providers: [Counter] })
+export class WidgetComponent { constructor(readonly counter: Counter) {} }
+
+@NgModule({ declarations: [WidgetComponent] })
+export class WidgetModule {}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { Component, NgModule } from "ngjs-core";
+import { Counter } from "./counter";
+import { WidgetModule } from "./widget.module";
+
+@Component({ selector: "app-panel", template: "", providers: [Counter] })
+export class PanelComponent { constructor(readonly counter: Counter) {} }
+
+@NgModule({ declarations: [PanelComponent], imports: [WidgetModule] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";
+`);
+
+    const { dom, angular } = await bootstrap(`<lib-widget></lib-widget><lib-widget></lib-widget><app-panel></app-panel>`);
+    const ids = [...dom.window.document.querySelectorAll("lib-widget, app-panel")].map(
+      (el) => (angular.element(el).controller(el.tagName === "APP-PANEL" ? "appPanel" : "libWidget") as { counter: { id: number } }).counter.id,
+    );
+
+    // Una instancia por elemento (tres) — con dos capas de injector serían dos por elemento.
+    expect(ids).toEqual([1, 2, 3]);
+  });
+
   it("lifecycle hooks: $onChanges/$onInit/$doCheck/$postLink/$onDestroy reales, content/view (init y checked) en el orden correcto", async () => {
     await write(
       "card.component.ts",
@@ -1155,11 +1252,17 @@ export class AppModule {}
     const $rootScope = injector.get<{ $digest(): void; $destroy(): void; theLabel?: string }>("$rootScope");
 
     /** `$doCheck` puede correr más de una vez en un mismo digest (una vez por pasada interna) — cada
-     * ocurrencia va seguida, sincrónico, de "afterContentChecked" y "afterViewChecked" en ese orden. */
+     * ocurrencia DESPUÉS del `$postLink` (los "Init") va seguida, sincrónico, de "afterContentChecked" y
+     * "afterViewChecked" en ese orden; antes, sola (como Angular: los "Checked" arrancan tras su "Init"). */
     function assertDoCheckGroups(calls: string[]): void {
+      const initialized = calls.indexOf("afterViewInit");
       const doCheckIndexes = calls.reduce<number[]>((acc, call, i) => (call === "doCheck" ? [...acc, i] : acc), []);
       expect(doCheckIndexes.length).toBeGreaterThan(0);
       for (const i of doCheckIndexes) {
+        if (i < initialized) {
+          expect(calls[i + 1]).not.toBe("afterContentChecked");
+          continue;
+        }
         expect(calls[i + 1]).toBe("afterContentChecked");
         expect(calls[i + 2]).toBe("afterViewChecked");
       }
@@ -1194,6 +1297,95 @@ export class AppModule {}
     controller.calls.length = 0;
     $rootScope.$destroy();
     expect(controller.calls).toEqual(["onDestroy"]);
+  });
+
+  it("ngOnChanges con @Input con alias: llega por la propiedad (AngularJS indexa changesObj por la clave de bindings)", async () => {
+    await write(
+      "card.component.ts",
+      `import { Component, Input } from "ngjs-core";
+
+@Component({ selector: "app-card", template: "" })
+export class CardComponent {
+  @Input("aka") label!: string;
+  seen: string[] = [];
+
+  ngOnChanges(changes: any): void { this.seen.push(Object.keys(changes).join(",") + "=" + changes.label?.currentValue); }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+
+@NgModule({ declarations: [CardComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap(`<app-card aka="value"></app-card>`);
+    const controller = angular.element(dom.window.document.querySelector("app-card")!).controller("appCard") as { seen: string[] };
+    const $rootScope = injector.get<{ $digest(): void; value?: string }>("$rootScope");
+
+    $rootScope.value = "Ana";
+    $rootScope.$digest();
+
+    expect(controller.seen).toEqual(["label=undefined", "label=Ana"]);
+  });
+
+  it("controllerAs de @NgModule en 3 capas: el del @Component gana, si no el de su módulo, si no el del módulo que lo importa; sin ninguno $ctrl", async () => {
+    await write(
+      "grand.module.ts",
+      `import { Component, NgModule } from "ngjs-core";
+
+@Component({ selector: "ca-grandchild", template: "<span>{{ $.v }}</span>" })
+export class Grandchild { v = "gc"; }
+
+@NgModule({ declarations: [Grandchild] })
+export class GrandModule {}
+`,
+    );
+    await write(
+      "plain.module.ts",
+      `import { Component, NgModule } from "ngjs-core";
+
+@Component({ selector: "ca-plain", template: "<span>{{ $ctrl.v }}</span>" })
+export class Plain { v = "plain"; }
+
+@NgModule({ declarations: [Plain] })
+export class PlainModule {}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { Component, Directive, NgModule } from "ngjs-core";
+import { GrandModule } from "./grand.module";
+
+@Component({ selector: "ca-child", template: "<span>{{ $.v }}</span>" })
+export class Child { v = "c"; }
+
+@Component({ selector: "ca-own", controllerAs: "vm", template: "<span>{{ vm.v }}</span>" })
+export class Own { v = "own"; }
+
+@Directive({ selector: "[caTpl]", template: "<i>{{ $.v }}</i>" })
+export class WithTemplate { v = "dir"; }
+
+@NgModule({ controllerAs: "$", imports: [GrandModule], declarations: [Child, Own, WithTemplate] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";
+import "./plain.module";
+`);
+
+    const { dom } = await bootstrap(`<ca-child></ca-child><ca-own></ca-own><ca-grandchild></ca-grandchild><div ca-tpl></div>`);
+    const text = (selector: string) => dom.window.document.querySelector(selector)?.textContent?.trim();
+
+    expect(text("ca-child span")).toBe("c");
+    expect(text("ca-own span")).toBe("own");
+    expect(text("ca-grandchild span")).toBe("gc");
+    expect(text("[ca-tpl] i")).toBe("dir");
   });
 
   it("selector compuesto (tag[atributo]): activa en el tag correcto, queda inerte (sin romper la página) en el equivocado", async () => {

@@ -1,4 +1,5 @@
 import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
+import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { ElementInstances, HOST_DATA_KEY } from "@/compiler/element-instances.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HostWiring } from "@/compiler/host-wiring.ts";
@@ -79,6 +80,9 @@ export class DecoratorWriter {
     }
 
     if (metadata.kind === "component" || metadata.kind === "directive") {
+      // La clase, colgada del array que recibe `$controller` (como el `type` de Ivy): quien intercepta `$controller`
+      // sabe QUÉ va a construir antes de construirlo (el runtime lo necesita para `hostDirectives`).
+      statements.push(`${metadata.className}.ɵfac.ɵtype = ${metadata.className};`);
       if (ScopedProviders.hasAny(metadata.providers)) statements.push(ScopedProviders.statement(metadata.className, metadata.providers));
       if (LifecycleWiring.hasAny(metadata.lifecycleHooks)) {
         statements.push(...LifecycleWiring.statements(metadata.className, metadata.lifecycleHooks, metadata.inputs));
@@ -230,6 +234,11 @@ export class DecoratorWriter {
     if (contentQueries.length) fields.push(`queries: [${contentQueries.map(DecoratorWriter.queryDef).join(", ")}]`);
     if (viewQueries.length) fields.push(`viewQueries: [${viewQueries.map(DecoratorWriter.queryDef).join(", ")}]`);
     if (metadata.hostDirectives.length) fields.push(`hostDirectives: [${metadata.hostDirectives.map(DecoratorWriter.hostDirectiveDef).join(", ")}]`);
+    // Lo que `.component()` necesita (sin `controller`, que es `ɵfac`): para registrarlo al vuelo (`loadComponent`).
+    if (field === "ɵcmp") fields.push(`definition: ${JSON.stringify(ComponentDefinition.fields(metadata as ComponentMetadata, undefined, null))}`);
+    else if ((metadata.options as { selector?: string }).selector) {
+      fields.push(`definition: ${JSON.stringify(ComponentDefinition.directiveFields(metadata as DirectiveMetadata))}`);
+    }
     return `${metadata.className}.${field} = { ${fields.join(", ")} };`;
   }
 

@@ -162,4 +162,70 @@ describe("ZonePatchesRuntime", () => {
     expect(clicks).toBe(0);
     expect(hovers).toBe(1);
   });
+
+  it("el mismo handler en dos elementos: remove en uno no toca el del otro (el wrapper se busca por target)", () => {
+    const win = evaluate();
+    const a = win.document.createElement("button");
+    const b = win.document.createElement("button");
+    const seen: string[] = [];
+    const handler = function (this: HTMLElement) {
+      seen.push(this === a ? "a" : "b");
+    };
+
+    a.addEventListener("click", handler);
+    b.addEventListener("click", handler);
+    b.removeEventListener("click", handler);
+
+    a.dispatchEvent(new win.Event("click"));
+    b.dispatchEvent(new win.Event("click"));
+
+    expect(seen).toEqual(["a"]);
+  });
+
+  it("el mismo handler dos veces en el mismo target/tipo/fase se registra una sola vez (como el nativo)", () => {
+    const win = evaluate();
+    const el = win.document.createElement("button");
+    let clicks = 0;
+    const handler = () => {
+      clicks++;
+    };
+
+    el.addEventListener("click", handler);
+    el.addEventListener("click", handler);
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(1);
+
+    el.removeEventListener("click", handler);
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(1);
+  });
+
+  it("lo programado dentro de runOutsideAngular (globalThis.ɵngjsOutsideAngular > 0) no dispara $apply al correr", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    const globals = win as unknown as { ɵngjsRootScope: unknown; ɵngjsOutsideAngular: number };
+    globals.ɵngjsRootScope = scope;
+
+    globals.ɵngjsOutsideAngular = 1;
+    const outside = new Promise<void>((resolve) => win.setTimeout(resolve, 0));
+    const el = win.document.createElement("button");
+    el.addEventListener("click", () => {});
+    globals.ɵngjsOutsideAngular = 0;
+
+    await outside;
+    el.dispatchEvent(new win.Event("click"));
+    expect(scope.calls).toBe(0);
+
+    // Programado afuera de runOutsideAngular: sí.
+    await new Promise<void>((resolve) => win.setTimeout(resolve, 0));
+    expect(scope.calls).toBe(1);
+  });
+
+  it("con la app destruida ($rootScope.$root === null) un timer pendiente no explota", async () => {
+    const win = evaluate();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = { $root: null, $apply: () => { throw new Error("no"); } };
+    let ran = false;
+    await new Promise<void>((resolve) => win.setTimeout(() => { ran = true; resolve(); }, 0));
+    expect(ran).toBe(true);
+  });
 });

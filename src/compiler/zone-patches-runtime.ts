@@ -20,6 +20,9 @@
  *   se compila a un helper basado en generadores que SÍ llama `.then()` por debajo (confirmado con esbuild
  *   real), así el patch los agarra igual, indirectamente.
  *
+ * `NgZone.runOutsideAngular` (de `ngjs-core`) marca `globalThis.ɵngjsOutsideAngular` mientras corre: lo programado ahí
+ * no dispara digest (se decide al programar, como la zona de Angular).
+ *
  * Fuera de alcance a propósito (no es Zone.js completo): fetch/XHR nativos, MutationObserver,
  * requestAnimationFrame, WebSocket.
  */
@@ -31,45 +34,67 @@ export class ZonePatchesRuntime {
 
   function ɵsafeApply() {
     var scope = globalThis.ɵngjsRootScope;
-    if (!scope || scope.$root.$$phase) return;
+    // Un \`$rootScope\` destruido (app destruida) queda con \`$root = null\`: un timer pendiente ya no tiene a quién aplicarle.
+    if (!scope || !scope.$root || scope.$root.$$phase) return;
     scope.$apply();
+  }
+
+  // \`NgZone.runOutsideAngular(fn)\` sube \`globalThis.ɵngjsOutsideAngular\` mientras corre \`fn\`: lo que se programe ahí
+  // (timer, listener, \`.then\`) no dispara digest al correr — se decide al PROGRAMARLO, como la zona de Angular.
+  function ɵinside() {
+    return !(globalThis.ɵngjsOutsideAngular > 0);
   }
 
   var ɵsetTimeout = window.setTimeout;
   window.setTimeout = function (fn, delay) {
     if (typeof fn !== "function") return ɵsetTimeout.apply(window, arguments);
     var extra = Array.prototype.slice.call(arguments, 2);
-    return ɵsetTimeout.call(window, function () { fn.apply(null, extra); ɵsafeApply(); }, delay);
+    var inside = ɵinside();
+    return ɵsetTimeout.call(window, function () { fn.apply(null, extra); if (inside) ɵsafeApply(); }, delay);
   };
 
   var ɵsetInterval = window.setInterval;
   window.setInterval = function (fn, delay) {
     if (typeof fn !== "function") return ɵsetInterval.apply(window, arguments);
     var extra = Array.prototype.slice.call(arguments, 2);
-    return ɵsetInterval.call(window, function () { fn.apply(null, extra); ɵsafeApply(); }, delay);
+    var inside = ɵinside();
+    return ɵsetInterval.call(window, function () { fn.apply(null, extra); if (inside) ɵsafeApply(); }, delay);
   };
 
   var ɵthen = Promise.prototype.then;
   Promise.prototype.then = function (onFulfilled, onRejected) {
+    var inside = ɵinside();
     var wrap = function (fn) {
-      return typeof fn === "function" ? function (value) { var result = fn(value); ɵsafeApply(); return result; } : fn;
+      return typeof fn === "function" ? function (value) { var result = fn(value); if (inside) ɵsafeApply(); return result; } : fn;
     };
     return ɵthen.call(this, wrap(onFulfilled), wrap(onRejected));
   };
 
-  // listener original -> [{ type, capture, wrapped }] — así \`removeEventListener\` encuentra el wrapper
-  // real que quedó registrado, no el original (que nunca se le pasó al \`addEventListener\` nativo).
+  // listener original -> [{ target, type, capture, wrapped }] — así \`removeEventListener\` encuentra el wrapper
+  // real que quedó registrado EN ESE target (no el original, que nunca se le pasó al \`addEventListener\` nativo;
+  // ni el de otro elemento que comparte el mismo handler).
   var ɵwrappers = new WeakMap();
   var ɵaddEventListener = EventTarget.prototype.addEventListener;
   var ɵremoveEventListener = EventTarget.prototype.removeEventListener;
 
+  function ɵfindWrapper(entries, target, type, capture) {
+    if (!entries) return -1;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].target === target && entries[i].type === type && entries[i].capture === capture) return i;
+    }
+    return -1;
+  }
+
   EventTarget.prototype.addEventListener = function (type, listener, options) {
     if (typeof listener !== "function") return ɵaddEventListener.call(this, type, listener, options);
     var capture = typeof options === "boolean" ? options : !!(options && options.capture);
-    var wrapped = function (event) { listener.call(this, event); ɵsafeApply(); };
     var entries = ɵwrappers.get(listener);
+    // Como el nativo: el mismo listener dos veces en el mismo target/tipo/fase se registra una sola vez.
+    if (ɵfindWrapper(entries, this, type, capture) !== -1) return;
+    var inside = ɵinside();
+    var wrapped = function (event) { var result = listener.call(this, event); if (inside) ɵsafeApply(); return result; };
     if (!entries) { entries = []; ɵwrappers.set(listener, entries); }
-    entries.push({ type: type, capture: capture, wrapped: wrapped });
+    entries.push({ target: this, type: type, capture: capture, wrapped: wrapped });
     return ɵaddEventListener.call(this, type, wrapped, options);
   };
 
@@ -77,17 +102,13 @@ export class ZonePatchesRuntime {
     if (typeof listener !== "function") return ɵremoveEventListener.call(this, type, listener, options);
     var capture = typeof options === "boolean" ? options : !!(options && options.capture);
     var entries = ɵwrappers.get(listener);
-    var target = listener;
-    if (entries) {
-      for (var i = 0; i < entries.length; i++) {
-        if (entries[i].type === type && entries[i].capture === capture) {
-          target = entries[i].wrapped;
-          entries.splice(i, 1);
-          break;
-        }
-      }
+    var index = ɵfindWrapper(entries, this, type, capture);
+    var registered = listener;
+    if (index !== -1) {
+      registered = entries[index].wrapped;
+      entries.splice(index, 1);
     }
-    return ɵremoveEventListener.call(this, type, target, options);
+    return ɵremoveEventListener.call(this, type, registered, options);
   };
 })();`;
   }

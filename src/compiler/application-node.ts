@@ -27,6 +27,11 @@ export class ApplicationNode {
   legacyImports: string[] = [];
   /** Llamadas de `imports` (`ConfigModule.forRoot(options)`), texto fuente — se evalúan al correr, ver `ModuleWithProvidersRuntime`. */
   callImports: string[] = [];
+  /**
+   * Solo `@NgModule`: el `controllerAs` por defecto de sus componentes (y directivas con template) — el propio, o el
+   * del módulo que lo importa si no declara uno (ver `ApplicationScanner.inheritControllerAs`).
+   */
+  controllerAs?: string;
 
   constructor(
     public readonly className: string,

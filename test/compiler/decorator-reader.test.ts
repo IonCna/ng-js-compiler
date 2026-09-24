@@ -32,6 +32,7 @@ describe("decoratorReaderTransform", () => {
 
   it("lee constructorTokens: @Inject(Token) tiene prioridad, sin decorador cae al tipo (como Angular real)", async () => {
     const code = `
+      class HttpClient {}
       @Component({ selector: "app-card" })
       export class CardComponent {
         constructor(@Inject(SomeToken) private svc: SomeService, private http: HttpClient) {}
@@ -78,7 +79,7 @@ describe("decoratorReaderTransform", () => {
 
     it("@Attribute('x'): no es DI, queda el nombre del atributo; en un servicio es error en build", async () => {
       await decoratorReaderTransform.transform(
-        `@Directive({ selector: "[appBtn]" }) export class BtnDirective { constructor(@Attribute("type") type: string, http: HttpClient) {} }`,
+        `class HttpClient {} @Directive({ selector: "[appBtn]" }) export class BtnDirective { constructor(@Attribute("type") type: string, http: HttpClient) {} }`,
         "btn.ts",
       );
       const [metadata] = MetadataStore.get("btn.ts") as [ComponentMetadata];
@@ -184,6 +185,7 @@ describe("decoratorReaderTransform", () => {
       const code = `
         import { BaseCard as Base } from "./base";
         @Component({ selector: "app-card" }) export class CardComponent extends Base {}
+        class HttpClient {}
         @Injectable() export class FooService { constructor(http: HttpClient) {} }
       `;
 
@@ -263,6 +265,7 @@ describe("decoratorReaderTransform", () => {
 
   it("flags de DI: @Self/@SkipSelf/@Host/@Optional en el constructor, en inject() y como new X() en deps", async () => {
     const code = `
+      class Local {} class Parent {} class HostThing {}
       @Component({ selector: "app-card", providers: [{ provide: "report", useFactory: (a: unknown) => a, deps: [[new SkipSelf(), new Optional(), Parent]] }] })
       export class CardComponent {
         private own = inject(Theme, { self: true, optional: false });
@@ -281,6 +284,7 @@ describe("decoratorReaderTransform", () => {
 
   it("@Optional(): marca el parámetro, se saca del código y acepta `Tipo | null` como token", async () => {
     const code = `
+      class HttpClient {} class Logger {}
       @Injectable()
       export class FooService {
         constructor(private http: HttpClient, @Optional() private logger: Logger | null, @Optional() @Inject(CONFIG) private config?: unknown) {}
@@ -311,6 +315,7 @@ describe("decoratorReaderTransform", () => {
 
   it("un parámetro sin @Inject ni tipo de clase es error en build", async () => {
     const code = `
+      class HttpClient {}
       @Component({ selector: "app-card" })
       export class CardComponent {
         constructor(private http: HttpClient, private untyped) {}
@@ -322,11 +327,23 @@ describe("decoratorReaderTransform", () => {
     );
   });
 
+  it("un tipo global (ni importado ni declarado en el archivo, ej. Window) no es token: error en build que pide @Inject", async () => {
+    const code = `
+      @Injectable()
+      export class ScrollService {
+        constructor(private win: Window) {}
+      }
+    `;
+
+    await expect(decoratorReaderTransform.transform(code, "scroll.ts")).rejects.toThrow(/el tipo "Window" .* usá @Inject\(TOKEN\)/);
+  });
+
   it("resuelve el nombre de DI por el import: paquete del specifier, símbolo exportado (no el alias), import type incluido", async () => {
     const code = `
       import { HttpClient as Http } from "ngjs-core/http";
       import type { Store } from "@acme/store/core";
       import { UserService } from "./user.service";
+      export class LocalThing {}
       @Component({ selector: "app-card" })
       export class CardComponent {
         constructor(private http: Http, private store: Store, private users: UserService, private local: LocalThing) {}
@@ -346,11 +363,50 @@ describe("decoratorReaderTransform", () => {
     expect(metadata.constructorImports).toEqual(["ngjs-core/http", "@acme/store/core", "./user.service"]);
   });
 
+  it("un import por alias de tsconfig (@/x, @app/x de compilerOptions.paths) es del mismo paquete, no un paquete npm con scope", async () => {
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "token-alias-"));
+    try {
+      await writeFile(join(dir, "package.json"), JSON.stringify({ name: "my-lib" }));
+      // Con comentarios y "/*" dentro de strings, como un tsconfig real.
+      await writeFile(join(dir, "tsconfig.json"), `{ /* opciones */ "compilerOptions": { "paths": { "@app/*": ["./src/*"], "@/*": ["./src/*"] } } // fin
+}`);
+      const code = `
+        import { Logger } from "@/core/logger";
+        import { Http } from "@app/http";
+        import { Store } from "@acme/store";
+        @Injectable()
+        export class Svc { constructor(a: Logger, b: Http, c: Store) {} }
+      `;
+      const path = join(dir, "svc.ts");
+      await decoratorReaderTransform.transform(code, path);
+      const [metadata] = MetadataStore.get(path) as [ServiceMetadata];
+
+      expect(metadata.constructorTokens).toEqual([TokenName.of("Logger", "my-lib"), TokenName.of("Http", "my-lib"), TokenName.of("Store", "@acme/store")]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("un servicio lleva su propio nombre de DI (token) — el mismo que calcula quien lo importa", async () => {
     await decoratorReaderTransform.transform(`@Injectable() export class UserService {}`, "user.service.ts");
     const [metadata] = MetadataStore.get("user.service.ts") as [ServiceMetadata];
 
     expect(metadata.token).toBe(own("UserService"));
+  });
+
+  it("lee un template escrito como template literal (backticks) sin interpolaciones; con `${}` no lo resuelve", async () => {
+    const code = [
+      '@Component({ selector: "app-a", template: `<a href="x">\n  \'b\'</a>` }) export class A {}',
+      "@Component({ selector: \"app-b\", template: `<b>${name}</b>` }) export class B {}",
+    ].join("\n");
+    await decoratorReaderTransform.transform(code, "tpl.ts");
+
+    const [a, b] = MetadataStore.get("tpl.ts") as [ComponentMetadata, ComponentMetadata];
+    expect(a.options).toEqual({ selector: "app-a", template: "<a href=\"x\">\n  'b'</a>" });
+    expect(b.options).toEqual({ selector: "app-b", template: undefined });
   });
 
   it("lee @Component con selector, inputs, outputs, host binding y host listener — y saca TODOS los decoradores reconocidos del código", async () => {
@@ -390,6 +446,40 @@ describe("decoratorReaderTransform", () => {
     expect(metadata.outputs).toEqual([{ propName: "closed", bindingName: "closed" }]);
     expect(metadata.hostBindings).toEqual([{ propName: "isOpen", hostProperty: "class.open" }]);
     expect(metadata.hostListeners).toEqual([{ methodName: "onClick", eventName: "click", args: ["$event"] }]);
+  });
+
+  it("@Input/@HostBinding sobre accessors (setter/getter) y @Input/@Output con objeto de opciones", async () => {
+    const code = `
+      @Directive({ selector: "[appX]" })
+      export class XDirective {
+        @Input() set value(v: string) {}
+        @Input({ alias: "aka", required: true }) named!: string;
+        @Input({ binding: "@" }) label!: string;
+        @Output({ alias: "changed" }) change = new EventEmitter();
+        @HostBinding("class.active") get active(): boolean { return true; }
+      }
+    `;
+
+    const result = await decoratorReaderTransform.transform(code, "x.ts");
+    const [metadata] = MetadataStore.get("x.ts") as [ComponentMetadata];
+
+    expect(metadata.inputs).toEqual([
+      { propName: "value", bindingName: "value" },
+      { propName: "named", bindingName: "aka" },
+      { propName: "label", bindingName: "label", mode: "@" },
+    ]);
+    expect(metadata.outputs).toEqual([{ propName: "change", bindingName: "changed" }]);
+    expect(metadata.hostBindings).toEqual([{ propName: "active", hostProperty: "class.active" }]);
+    expect(result).not.toMatch(/@(Input|Output|HostBinding)/);
+  });
+
+  it("@Input({ transform }) o una opción desconocida es error en build (no se ignora)", async () => {
+    await expect(
+      decoratorReaderTransform.transform(`@Directive({ selector: "[a]" }) export class A { @Input({ transform: booleanAttribute }) on!: boolean; }`, "a.ts"),
+    ).rejects.toThrow("`transform` no está soportado");
+    await expect(
+      decoratorReaderTransform.transform(`@Directive({ selector: "[b]" }) export class B { @Output({ foo: 1 }) done = 1; }`, "b.ts"),
+    ).rejects.toThrow('opción "foo" desconocida');
   });
 
   it("detecta métodos de lifecycle por nombre (sin decorador) y NO los toca en el código", async () => {

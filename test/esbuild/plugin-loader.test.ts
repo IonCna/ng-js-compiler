@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { MetadataStore } from "@/metadata/metadata-store.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as esbuild from "esbuild";
@@ -12,6 +13,8 @@ describe("pluginLoader", () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "plugin-loader-test-"));
+    await writeFile(join(dir, "package.json"), JSON.stringify({ name: "test-app" }));
+    MetadataStore.clear();
   });
 
   afterEach(async () => {
@@ -44,7 +47,8 @@ describe("pluginLoader", () => {
       plugins: [pluginLoader(dir, [replaceValue, noop])],
     });
 
-    expect(calls).toEqual(["replaceValue", "noop"]);
+    // Una vez en el escaneo (que ve el mismo código que la emisión) y otra al emitir.
+    expect(calls).toEqual(["replaceValue", "noop", "replaceValue", "noop"]);
     expect(result.outputFiles[0]?.text).toContain("42");
   });
 
@@ -103,7 +107,64 @@ describe("pluginLoader", () => {
       plugins: [pluginLoader(dir, [track], { [original]: replacement })],
     });
 
-    expect(seenPaths).toEqual([replacement]);
+    // El escaneo también lee el reemplazo (por el original y por sí mismo), nunca el original; después la emisión.
+    expect(seenPaths).toEqual([replacement, replacement, replacement]);
     expect(result.outputFiles[0]?.text).toContain("production = true");
+  });
+
+  it("el escaneo ve lo que dejan los transforms previos: un template inlineado se registra inline, no como templateUrl", async () => {
+    await writeFile(
+      join(dir, "card.component.ts"),
+      `import { Component } from "ngjs-core";
+@Component({ selector: "app-card", templateUrl: "./card.html" })
+export class CardComponent {}
+`,
+    );
+    await writeFile(
+      join(dir, "app.module.ts"),
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+@NgModule({ declarations: [CardComponent] })
+export class AppModule {}
+`,
+    );
+    // Como `templateTransform` de `ng-js-vite`: reemplaza `templateUrl` por el template inline.
+    const inlineTemplate: NgjsTransform = {
+      async transform(code) {
+        return code.includes("templateUrl") ? code.replace(`templateUrl: "./card.html"`, `template: "<b>card</b>"`) : undefined;
+      },
+    };
+
+    const result = await esbuild.build({
+      entryPoints: [join(dir, "app.module.ts")],
+      bundle: true,
+      write: false,
+      format: "esm",
+      external: ["angular", "ngjs-core"],
+      plugins: [pluginLoader(dir, [inlineTemplate], {}, "library")],
+    });
+
+    const text = result.outputFiles[0]!.text;
+    expect(text).toContain(`template: "<b>card</b>"`);
+    expect(text).not.toContain("templateUrl");
+  });
+
+  it("si el escaneo falla, el build reporta ESE error (no uno de sintaxis por cada archivo TypeScript)", async () => {
+    await writeFile(
+      join(dir, "svc.ts"),
+      `import { Injectable } from "ngjs-core";
+export type Id = string;
+@Injectable()
+export class Svc { constructor(id: string) {} }
+`,
+    );
+
+    const failure = await esbuild
+      .build({ entryPoints: [join(dir, "svc.ts")], bundle: false, write: false, format: "esm", logLevel: "silent", plugins: [pluginLoader(dir, [], {}, "library")] })
+      .catch((error: esbuild.BuildFailure) => error);
+
+    const texts = (failure as esbuild.BuildFailure).errors.map((error) => error.text);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toContain("no tiene tipo de clase ni @Inject()");
   });
 });

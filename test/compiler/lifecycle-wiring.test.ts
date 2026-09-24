@@ -81,7 +81,8 @@ describe("LifecycleWiring", () => {
     const instance: { received?: unknown } = Object.create(proto);
     proto.$onChanges!.call(instance, {
       title: { previousValue: undefined, currentValue: "Hola", isFirstChange: () => true },
-      aka: { previousValue: "a", currentValue: "b", isFirstChange: () => false },
+      // AngularJS indexa por la clave de `bindings` (la propiedad), no por el atributo (`aka`).
+      alias: { previousValue: "a", currentValue: "b", isFirstChange: () => false },
       // Un binding que no está declarado en `inputs` (otro bridge, o ruido) se ignora sin romper nada.
       unrelated: { previousValue: 1, currentValue: 2, isFirstChange: () => true },
     });
@@ -107,7 +108,7 @@ describe("LifecycleWiring", () => {
     expect(instance.calls).toEqual(["doCheck"]);
   });
 
-  it("$doCheck: AfterContentChecked/AfterViewChecked corren sincrónico, en orden, después de ngDoCheck", () => {
+  it("$doCheck: AfterContentChecked/AfterViewChecked corren sincrónico, en orden, después de ngDoCheck — recién tras $postLink (como Angular, después de su Init)", () => {
     // Nada de $evalAsync acá: $doCheck corre una vez por CADA pasada interna del digest (no una vez por
     // digest lógico) — encolar algo en $evalAsync desde ahí deja la cola async no vacía para siempre y
     // AngularJS aborta con "$digest() iterations reached" (probado con AngularJS real).
@@ -122,8 +123,11 @@ describe("LifecycleWiring", () => {
     const instance: { calls: string[] } = Object.create(proto);
     instance.calls = [];
     proto.$doCheck!.call(instance);
+    expect(instance.calls).toEqual(["doCheck"]); // el primer $doCheck es antes del $postLink
 
-    expect(instance.calls).toEqual(["doCheck", "content", "view"]);
+    proto.$postLink!.call(instance);
+    proto.$doCheck!.call(instance);
+    expect(instance.calls).toEqual(["doCheck", "doCheck", "content", "view"]);
   });
 
   it("$doCheck: solo AfterViewChecked (sin ContentChecked ni ngDoCheck) también corre sincrónico", () => {
@@ -136,7 +140,10 @@ describe("LifecycleWiring", () => {
     const instance: { calls: string[] } = Object.create(proto);
     instance.calls = [];
     proto.$doCheck!.call(instance);
+    expect(instance.calls).toEqual([]);
 
+    proto.$postLink!.call(instance);
+    proto.$doCheck!.call(instance);
     expect(instance.calls).toEqual(["view"]);
   });
 });
