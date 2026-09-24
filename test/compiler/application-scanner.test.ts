@@ -299,4 +299,45 @@ export class UserService {}
 
     await expect(new ApplicationScanner().scan(dir)).rejects.toThrow(/"UserService" está declarada dos veces/);
   });
+
+  it("una clase NO exportada se identifica por archivo: se repite entre archivos, con su propio nombre de DI", async () => {
+    // Como el `TestComponent` de cada spec; el módulo de `a` declara el suyo, no el de `b`.
+    const spec = (selector: string, withModule: boolean) => `import { Component, NgModule } from "ngjs-core";
+
+@Component({ selector: "${selector}", template: "" })
+class TestComponent {}
+${withModule ? "\n@NgModule({ declarations: [TestComponent] })\nexport class LocalModule {}\n" : ""}`;
+    await writeFile(join(dir, "a.spec.ts"), spec("test-a", true), "utf8");
+    await writeFile(join(dir, "b.spec.ts"), spec("test-b", false), "utf8");
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+
+    const a = scanner.get("TestComponent", join(dir, "a.spec.ts"))!;
+    const b = scanner.get("TestComponent", join(dir, "b.spec.ts"))!;
+    expect(a.metadata.local).toBe(true);
+    expect(a.path).not.toBe(b.path);
+    expect(scanner.get("TestComponent")).toBeUndefined();
+    expect(scanner.get("LocalModule")?.declarations.components).toEqual([a]);
+
+    const token = (path: string) => (MetadataStore.get(path)[0] as { token?: string }).token;
+    expect(token(join(dir, "a.spec.ts"))).toBeUndefined();
+
+    // Un @Injectable local también: dos con el mismo nombre no comparten nombre de DI.
+    const service = `import { Injectable } from "ngjs-core";
+
+@Injectable()
+class Helper {}
+`;
+    await mkdir(join(dir, "x"), { recursive: true });
+    await writeFile(join(dir, "x", "one.ts"), service, "utf8");
+    await writeFile(join(dir, "x", "two.ts"), service, "utf8");
+    MetadataStore.clear();
+    await new ApplicationScanner().scan(dir);
+    const one = token(join(dir, "x", "one.ts"));
+    const two = token(join(dir, "x", "two.ts"));
+    expect(one).toMatch(/^Helper_/);
+    expect(two).toMatch(/^Helper_/);
+    expect(one).not.toBe(two);
+  });
 });

@@ -53,7 +53,7 @@ export class ModuleWriter {
     const registerResolve = this.scanner.usesInjectFlags();
 
     const statements = modules.map((metadata) => {
-      const node = this.scanner.get(metadata.className);
+      const node = this.scanner.get(metadata.className, path);
       if (!node) throw new Error(`ModuleWriter: "${metadata.className}" no está en el escaneo del proyecto (¿corrió ApplicationScanner.scan()?).`);
       const isRoot = (metadata as NgModuleMetadata).bootstrap.length > 0;
       const attachScopedInjector = (isRoot && needsScopedInjector) || ModuleWriter.declaresScopedProviders(node);
@@ -61,7 +61,7 @@ export class ModuleWriter {
       return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve);
     });
 
-    const needsModuleWithProviders = modules.some((metadata) => this.scanner.get(metadata.className)!.callImports.length > 0);
+    const needsModuleWithProviders = modules.some((metadata) => this.scanner.get(metadata.className, path)!.callImports.length > 0);
     // Los `multi` de un `ModuleWithProviders` también pasan por `MultiProvidersRuntime`.
     const needsMultiProviders =
       needsModuleWithProviders ||
@@ -243,20 +243,25 @@ export class ModuleWriter {
     const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
     const alternatives = SelectorParser.parse(options.selector);
 
-    for (const parsed of alternatives) {
-      if (parsed.restrict !== "E") {
-        throw new Error(
-          `ModuleWriter: "${node.className}" tiene selector de atributo (${JSON.stringify(options.selector)}) — @Component con selector de atributo no soportado todavía.`,
-        );
-      }
-    }
+    const definition = ComponentDefinition.fields(node.metadata as ComponentMetadata, moduleControllerAs);
+    const fields = (entries: Record<string, unknown>) => [
+      `controller: ${node.className}.ɵfac`,
+      ...Object.entries(entries).map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
+    ];
 
-    const definition = Object.entries(ComponentDefinition.fields(node.metadata as ComponentMetadata, moduleControllerAs));
-    const fields = [`controller: ${node.className}.ɵfac`, ...definition.map(([key, value]) => `${key}: ${JSON.stringify(value)}`)];
-
-    return ModuleWriter.uniqueByName(alternatives).map(
-      (parsed) => `.component(${JSON.stringify(parsed.registrationName)}, { ${fields.join(", ")} })`,
-    );
+    // Una alternativa de elemento y una de atributo con el mismo nombre (`app-card, [appCard]`) no chocan: `.component()`
+    // es solo `E` y la directiva, solo `A`.
+    const elements = ModuleWriter.uniqueByName(alternatives.filter((parsed) => parsed.restrict === "E"));
+    const attributes = ModuleWriter.uniqueByName(alternatives.filter((parsed) => parsed.restrict !== "E"));
+    return [...elements, ...attributes].map((parsed) => {
+      if (parsed.restrict === "E") return `.component(${JSON.stringify(parsed.registrationName)}, { ${fields(definition).join(", ")} })`;
+      // Selector de atributo (`[ngbAccordionBody]`): `.component()` solo sabe de elementos, así que va como la directiva
+      // que `.component()` arma por dentro — scope aislado (su `controllerAs` no pisa el del padre) y los `bindings`
+      // como `bindToController`.
+      const { bindings = {}, ...rest } = definition as { bindings?: Record<string, string> };
+      const directive = [...fields(rest), `restrict: ${JSON.stringify(parsed.restrict)}`, "scope: {}", `bindToController: ${JSON.stringify(bindings)}`];
+      return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${directive.join(", ")} }; })`;
+    });
   }
 
   /** El `controllerAs` del módulo solo aplica a una directiva CON template (su vista lo usa); si no, su nombre. */

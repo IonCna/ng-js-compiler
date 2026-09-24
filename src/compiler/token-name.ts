@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { HashId } from "@/compiler/hash-id.ts";
 
 /**
@@ -12,7 +12,7 @@ import { HashId } from "@/compiler/hash-id.ts";
  * el del specifier (`from "pkg/sub"` → `pkg`).
  */
 export class TokenName {
-  private static readonly packageByDir = new Map<string, string>();
+  private static readonly packageByDir = new Map<string, { name: string; dir: string }>();
   /** Patrones de `compilerOptions.paths` del `tsconfig.json` más cercano, por carpeta (`[]` si no hay). */
   private static readonly aliasesByDir = new Map<string, RegExp[]>();
 
@@ -20,8 +20,22 @@ export class TokenName {
     return HashId.readable(symbol, packageName);
   }
 
+  /**
+   * Clase NO exportada: nadie fuera de su archivo la puede nombrar, así que el archivo (relativo a su paquete, para
+   * que el build sea reproducible) entra en el nombre — dos `TestComponent` de specs distintos no chocan.
+   */
+  static local(symbol: string, path: string): string {
+    const { name, dir } = TokenName.packageRootOf(path);
+    return HashId.readable(symbol, name, relative(dir, resolve(path)).split(sep).join("/"));
+  }
+
   /** `name` del `package.json` más cercano subiendo desde `path` (archivo). */
   static packageOf(path: string): string {
+    return TokenName.packageRootOf(path).name;
+  }
+
+  /** El `package.json` más cercano subiendo desde `path` (archivo): su `name` y su carpeta. */
+  private static packageRootOf(path: string): { name: string; dir: string } {
     const start = dirname(resolve(path));
     let dir = start;
 
@@ -33,9 +47,10 @@ export class TokenName {
       if (existsSync(manifest)) {
         const { name } = JSON.parse(readFileSync(manifest, "utf8")) as { name?: string };
         if (!name) throw new Error(`TokenName: "${manifest}" no tiene "name" — hace falta para los nombres de DI.`);
-        TokenName.packageByDir.set(start, name);
-        TokenName.packageByDir.set(dir, name);
-        return name;
+        const root = { name, dir };
+        TokenName.packageByDir.set(start, root);
+        TokenName.packageByDir.set(dir, root);
+        return root;
       }
 
       const parent = dirname(dir);

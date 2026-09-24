@@ -1125,6 +1125,54 @@ export class AppModule {}
     expect(controller.clicks).toBe(1);
   });
 
+  it('@HostBinding("class"): suma string/array/objeto sin pisar las clases estáticas y saca las del valor anterior', async () => {
+    await write(
+      "badge.component.ts",
+      `import { Component, HostBinding } from "ngjs-core";
+
+@Component({ selector: "app-badge", template: "" })
+export class BadgeComponent {
+  type = "info";
+  @HostBinding("class") get hostClass(): unknown {
+    if (this.type === "list") return ["badge", "badge-list"];
+    if (this.type === "map") return { badge: true, "badge-map": true, hidden: false };
+    return \`badge badge-\${this.type}\`;
+  }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { BadgeComponent } from "./badge.component";
+
+@NgModule({ declarations: [BadgeComponent], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap(`<app-badge class="static"></app-badge>`);
+    const el = dom.window.document.querySelector("app-badge")!;
+    const controller = angular.element(el).controller("appBadge") as { type: string };
+    const rootScope = injector.get<{ $digest(): void }>("$rootScope");
+    const classes = () => [...el.classList].filter((name) => !name.startsWith("ng-")).sort();
+
+    expect(classes()).toEqual(["badge", "badge-info", "static"]);
+
+    controller.type = "warning";
+    rootScope.$digest();
+    expect(classes()).toEqual(["badge", "badge-warning", "static"]);
+
+    controller.type = "list";
+    rootScope.$digest();
+    expect(classes()).toEqual(["badge", "badge-list", "static"]);
+
+    controller.type = "map";
+    rootScope.$digest();
+    expect(classes()).toEqual(["badge", "badge-map", "static"]);
+  });
+
   it("@HostListener con target global (window:/document:) y filtro de tecla (keydown.enter / keydown.shift.tab)", async () => {
     await write(
       "keys.component.ts",

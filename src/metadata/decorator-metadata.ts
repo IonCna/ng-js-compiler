@@ -28,6 +28,11 @@ export interface InjectDep {
 export interface ConstructionMetadata {
   className: string;
   /**
+   * La clase no se exporta: solo se puede usar desde su archivo, así que su identidad (nombre de DI, nodo del
+   * escaneo) es archivo + nombre y puede repetirse en otros archivos — el `TestComponent` de cada spec.
+   */
+  local?: true;
+  /**
    * `extends Base` — el nombre exportado de la base (también si se importó con alias). Si es una clase decorada del
    * proyecto, `ClassHierarchy` hereda de ella el constructor, los `inject()` y los bindings.
    */

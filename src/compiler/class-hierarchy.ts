@@ -24,7 +24,7 @@ export class ClassHierarchy {
   static chain(metadata: ClassMetadata): ClassMetadata[] {
     const chain = [metadata];
     for (let current = metadata; current.superClass; ) {
-      const parent = MetadataStore.findClass(current.superClass);
+      const parent = MetadataStore.findClass(current.superClass, current);
       if (!parent || chain.includes(parent)) break;
       chain.unshift(parent);
       current = parent;

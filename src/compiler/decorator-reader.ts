@@ -50,6 +50,8 @@ interface FileContext {
   imports: ImportMap;
   /** Clases declaradas en el archivo (nivel superior) — un tipo de parámetro que no es import ni una de estas no es un token. */
   localClasses: Set<string>;
+  /** Nombres locales que el archivo exporta (`export class`, `export { X }`, `export default class`). */
+  exported: Set<string>;
 }
 
 /** Claves que acepta un provider objeto — cualquier otra es error (no se ignora en silencio). */
@@ -148,7 +150,7 @@ export class DecoratorReader {
 
     const ast = await parse(code, { syntax: "typescript", decorators: true, target: "es2022" });
 
-    const context: FileContext = { path, code, imports: DecoratorReader.readImports(ast.body, path), localClasses: DecoratorReader.localClasses(ast.body) };
+    const context: FileContext = { path, code, imports: DecoratorReader.readImports(ast.body, path), localClasses: DecoratorReader.localClasses(ast.body), exported: DecoratorReader.exportedNames(ast.body) };
     const metadata: DecoratorMetadata[] = [];
     const stripSpans: SourceEdit[] = [];
     for (const item of ast.body) {
@@ -202,8 +204,32 @@ export class DecoratorReader {
     return new Set(body.flatMap((item) => DecoratorReader.unwrapClassDeclaration(item)?.identifier.value ?? []));
   }
 
-  /** Identificador local → nombre de DI: por su import si viene de otro archivo, si no declarado acá (mismo paquete). */
+  /** Nombres locales exportados por el archivo: `export class X`, `export { X, Y as Z }` (sin `from`), `export default class X`. */
+  private static exportedNames(body: ModuleItem[]): Set<string> {
+    const names = new Set<string>();
+    for (const item of body) {
+      if (item.type === "ExportDeclaration" && item.declaration.type === "ClassDeclaration") names.add(item.declaration.identifier.value);
+      if (item.type === "ExportDefaultDeclaration" && item.decl.type === "ClassExpression" && item.decl.identifier) names.add(item.decl.identifier.value);
+      if (item.type === "ExportNamedDeclaration" && !item.source) {
+        for (const specifier of item.specifiers) {
+          if (specifier.type === "ExportSpecifier" && specifier.orig.type === "Identifier") names.add(specifier.orig.value);
+        }
+      }
+    }
+    return names;
+  }
+
+  /** Clase declarada en el archivo que no se exporta (ver `ConstructionMetadata.local`). */
+  private static isLocalClass(local: string, context: FileContext): boolean {
+    return !context.imports.has(local) && context.localClasses.has(local) && !context.exported.has(local);
+  }
+
+  /**
+   * Identificador local → nombre de DI: por su import si viene de otro archivo, si no declarado acá (mismo paquete).
+   * Una clase no exportada lleva además el archivo (`TokenName.local`).
+   */
   private static diName(local: string, context: FileContext): string {
+    if (DecoratorReader.isLocalClass(local, context)) return TokenName.local(local, context.path);
     const imported = context.imports.get(local);
     return TokenName.of(imported?.symbol ?? local, imported?.packageName ?? TokenName.packageOf(context.path));
   }
@@ -230,6 +256,7 @@ export class DecoratorReader {
       const injected = DecoratorReader.readInjectCalls(cls, stripSpans, context);
       const superClass = cls.superClass?.type === "Identifier" ? (context.imports.get(cls.superClass.value)?.symbol ?? cls.superClass.value) : undefined;
       const construction = {
+        ...(DecoratorReader.isLocalClass(className, context) && { local: true as const }),
         ...(superClass && { superClass }),
         hasConstructor: cls.body.some((member) => member.type === "Constructor"),
         constructorTokens: ctor.constructorTokens,
@@ -552,7 +579,7 @@ export class DecoratorReader {
    * reemplazados (`InjectedValues.ref`) — misma lectura que un `useFactory`, resolviendo tokens con los imports de `body`.
    */
   static tokenFactory(expr: Expression, owner: string, code: string, path: string, body: ModuleItem[]): { text: string; injectTokens: InjectDep[] } {
-    return DecoratorReader.factorySource(expr, owner, { path, code, imports: DecoratorReader.readImports(body, path), localClasses: DecoratorReader.localClasses(body) });
+    return DecoratorReader.factorySource(expr, owner, { path, code, imports: DecoratorReader.readImports(body, path), localClasses: DecoratorReader.localClasses(body), exported: DecoratorReader.exportedNames(body) });
   }
 
   /** `source()` con los `edits` que caen adentro de `node` aplicados (offsets relativos al nodo). */

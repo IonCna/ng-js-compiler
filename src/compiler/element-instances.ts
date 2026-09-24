@@ -64,6 +64,6 @@ export class ElementInstances {
   /** El mismo nombre de DI que `TokenName` le da a la clase en cada archivo que la usa como tipo. */
   private static tokenOf(metadata: ClassMetadata): string {
     const path = MetadataStore.entries().find(([, list]) => list.includes(metadata))?.[0] ?? "";
-    return TokenName.of(metadata.className, TokenName.packageOf(path));
+    return metadata.local ? TokenName.local(metadata.className, path) : TokenName.of(metadata.className, TokenName.packageOf(path));
   }
 }

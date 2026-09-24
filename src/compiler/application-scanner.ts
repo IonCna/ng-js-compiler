@@ -46,14 +46,16 @@ export class ApplicationScanner {
       await DecoratorReader.read(code, path);
 
       for (const metadata of MetadataStore.get(path)) {
-        // El nombre de DI (`TokenName`) es símbolo + paquete — dos clases con el mismo nombre en el proyecto chocarían.
-        const existing = this.nodes.get(metadata.className);
+        // El nombre de DI (`TokenName`) es símbolo + paquete — dos clases EXPORTADAS con el mismo nombre en el proyecto
+        // chocarían. Una no exportada (`local`) se identifica por archivo + nombre: puede repetirse entre archivos.
+        const key = ApplicationScanner.key(metadata.className, path, metadata.local);
+        const existing = this.nodes.get(key);
         if (existing && existing.path !== path) {
           throw new Error(
             `ApplicationScanner: "${metadata.className}" está declarada dos veces ("${existing.path}" y "${path}") — los nombres tienen que ser únicos en el proyecto.`,
           );
         }
-        this.nodes.set(metadata.className, new ApplicationNode(metadata.className, path, metadata));
+        this.nodes.set(key, new ApplicationNode(metadata.className, path, metadata));
       }
     }
 
@@ -70,8 +72,13 @@ export class ApplicationScanner {
     return code;
   }
 
-  get(className: string): ApplicationNode | undefined {
-    return this.nodes.get(className);
+  /** Por nombre, como se ve desde `path`: primero una clase no exportada de ese archivo, después una exportada. */
+  get(className: string, path?: string): ApplicationNode | undefined {
+    return (path && this.nodes.get(ApplicationScanner.key(className, path, true))) || this.nodes.get(className);
+  }
+
+  private static key(className: string, path: string, local: boolean | undefined): string {
+    return local ? `${resolve(path)}#${className}` : className;
   }
 
   /** Gate de todo el proyecto para `ScopedInjectorRuntime`: si nadie declara `providers` propios, no se estampa nada. */
@@ -135,7 +142,7 @@ export class ApplicationScanner {
 
   private resolveModule(node: ApplicationNode, metadata: NgModuleMetadata): void {
     for (const name of metadata.declarations) {
-      const declared = this.nodes.get(name);
+      const declared = this.get(name, node.path);
       if (!declared) continue;
 
       ApplicationScanner.bucketFor(node, declared).push(declared);
@@ -166,7 +173,7 @@ export class ApplicationScanner {
         return;
     }
 
-    const own = this.nodes.get(imported.identifier);
+    const own = this.get(imported.identifier, node.path);
     if (!own) {
       node.legacyImports.push(ApplicationScanner.externalModuleName(imported.identifier));
       return;

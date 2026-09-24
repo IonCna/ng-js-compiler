@@ -2,7 +2,7 @@ import type { BindingsMetadata } from "@/metadata/decorator-metadata.ts";
 
 type HostBinding = BindingsMetadata["hostBindings"][number];
 type HostListener = BindingsMetadata["hostListeners"][number];
-type ParsedHostProperty = { kind: "class" | "attr" | "style" | "prop"; name: string; unit?: string };
+type ParsedHostProperty = { kind: "class" | "classMap" | "attr" | "style" | "prop"; name: string; unit?: string };
 /** Dónde escucha un `@HostListener`: el host, o un target global (`"window:resize"`). */
 type ListenerTarget = "host" | "window" | "document" | "body";
 
@@ -39,8 +39,13 @@ export class HostWiring {
 
   private static watchStatement(binding: HostBinding, index: number, owner: string): string {
     const parsed = HostWiring.parseHostProperty(binding.hostProperty, owner, binding.propName);
+    const getter = `function () { return instance.${binding.propName}; }`;
+    if (parsed.kind === "classMap") {
+      // Por valor (`true`): un getter que arma un array/objeto nuevo en cada digest no es un cambio.
+      return `var ɵunwatch${index} = $scope.$watch(${getter}, function (v, old) { ${HostWiring.classMapExpr("v", "old")} }, true);`;
+    }
     const apply = HostWiring.applyExpr(parsed, "v");
-    return `var ɵunwatch${index} = $scope.$watch(function () { return instance.${binding.propName}; }, function (v) { ${apply}; });`;
+    return `var ɵunwatch${index} = $scope.$watch(${getter}, function (v) { ${apply}; });`;
   }
 
   /**
@@ -140,12 +145,29 @@ export class HostWiring {
       throw new Error(`HostWiring: "${owner}.${propName}" — @HostBinding(${JSON.stringify(hostProperty)}) no soportado todavía.`);
     };
 
+    if (hostProperty === "class" || hostProperty === "className") return { kind: "classMap", name: hostProperty };
     if (parts.length === 1) return { kind: "prop", name: parts[0]! };
     if (parts.length === 2 && (parts[0] === "class" || parts[0] === "attr" || parts[0] === "style")) {
       return { kind: parts[0], name: parts[1]! };
     }
     if (parts.length === 3 && parts[0] === "style") return { kind: "style", name: parts[1]!, unit: parts[2] };
     return fail();
+  }
+
+  /**
+   * `@HostBinding("class")` (`[class]` de Angular): string, array u objeto `{ clase: condición }`. Se suman al host
+   * sin tocar sus clases estáticas ni las de otros bindings; al cambiar, se sacan las del valor anterior.
+   */
+  private static classMapExpr(valueVar: string, oldVar: string): string {
+    const names = [
+      "var ɵnames = function (value) {",
+      'if (!value) return "";',
+      'if (typeof value === "string") return value;',
+      'if (Array.isArray(value)) return value.join(" ");',
+      'return Object.keys(value).filter(function (key) { return value[key]; }).join(" ");',
+      "};",
+    ].join(" ");
+    return `${names} if (${valueVar} !== ${oldVar}) $element.removeClass(ɵnames(${oldVar})); $element.addClass(ɵnames(${valueVar}));`;
   }
 
   /**
@@ -156,6 +178,8 @@ export class HostWiring {
     const name = JSON.stringify(parsed.name);
 
     switch (parsed.kind) {
+      case "classMap":
+        throw new Error("HostWiring: `class` necesita el valor anterior — va por `classMapExpr`.");
       case "class":
         return `${valueVar} ? $element.addClass(${name}) : $element.removeClass(${name})`;
       case "attr":

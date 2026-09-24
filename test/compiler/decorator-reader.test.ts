@@ -32,7 +32,7 @@ describe("decoratorReaderTransform", () => {
 
   it("lee constructorTokens: @Inject(Token) tiene prioridad, sin decorador cae al tipo (como Angular real)", async () => {
     const code = `
-      class HttpClient {}
+      export class HttpClient {}
       @Component({ selector: "app-card" })
       export class CardComponent {
         constructor(@Inject(SomeToken) private svc: SomeService, private http: HttpClient) {}
@@ -79,7 +79,7 @@ describe("decoratorReaderTransform", () => {
 
     it("@Attribute('x'): no es DI, queda el nombre del atributo; en un servicio es error en build", async () => {
       await decoratorReaderTransform.transform(
-        `class HttpClient {} @Directive({ selector: "[appBtn]" }) export class BtnDirective { constructor(@Attribute("type") type: string, http: HttpClient) {} }`,
+        `export class HttpClient {} @Directive({ selector: "[appBtn]" }) export class BtnDirective { constructor(@Attribute("type") type: string, http: HttpClient) {} }`,
         "btn.ts",
       );
       const [metadata] = MetadataStore.get("btn.ts") as [ComponentMetadata];
@@ -185,7 +185,7 @@ describe("decoratorReaderTransform", () => {
       const code = `
         import { BaseCard as Base } from "./base";
         @Component({ selector: "app-card" }) export class CardComponent extends Base {}
-        class HttpClient {}
+        export class HttpClient {}
         @Injectable() export class FooService { constructor(http: HttpClient) {} }
       `;
 
@@ -265,7 +265,7 @@ describe("decoratorReaderTransform", () => {
 
   it("flags de DI: @Self/@SkipSelf/@Host/@Optional en el constructor, en inject() y como new X() en deps", async () => {
     const code = `
-      class Local {} class Parent {} class HostThing {}
+      export class Local {} export class Parent {} export class HostThing {}
       @Component({ selector: "app-card", providers: [{ provide: "report", useFactory: (a: unknown) => a, deps: [[new SkipSelf(), new Optional(), Parent]] }] })
       export class CardComponent {
         private own = inject(Theme, { self: true, optional: false });
@@ -284,7 +284,7 @@ describe("decoratorReaderTransform", () => {
 
   it("@Optional(): marca el parámetro, se saca del código y acepta `Tipo | null` como token", async () => {
     const code = `
-      class HttpClient {} class Logger {}
+      export class HttpClient {} export class Logger {}
       @Injectable()
       export class FooService {
         constructor(private http: HttpClient, @Optional() private logger: Logger | null, @Optional() @Inject(CONFIG) private config?: unknown) {}
@@ -315,7 +315,7 @@ describe("decoratorReaderTransform", () => {
 
   it("un parámetro sin @Inject ni tipo de clase es error en build", async () => {
     const code = `
-      class HttpClient {}
+      export class HttpClient {}
       @Component({ selector: "app-card" })
       export class CardComponent {
         constructor(private http: HttpClient, private untyped) {}

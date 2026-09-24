@@ -18,13 +18,16 @@ export class MetadataStore {
   }
 
   /**
-   * Una clase decorada por nombre, en cualquier archivo ya leído (los nombres son únicos en el proyecto — ver
-   * `ApplicationScanner`, que lee todo antes de emitir). Para `ClassHierarchy`: la base de un `extends` suele estar
-   * en otro archivo.
+   * Una clase decorada por nombre, como se ve desde `from`: primero una del mismo archivo (puede ser no exportada),
+   * después una exportada de cualquier archivo ya leído (esas son únicas en el proyecto — ver `ApplicationScanner`,
+   * que lee todo antes de emitir). Para `ClassHierarchy`: la base de un `extends` suele estar en otro archivo.
    */
-  static findClass(className: string): DecoratorMetadata | undefined {
+  static findClass(className: string, from?: DecoratorMetadata): DecoratorMetadata | undefined {
+    const sameFile = from && [...MetadataStore.store.values()].find((metadata) => metadata.includes(from));
+    const own = sameFile?.find((candidate) => candidate.className === className);
+    if (own) return own;
     for (const metadata of MetadataStore.store.values()) {
-      const found = metadata.find((candidate) => candidate.className === className);
+      const found = metadata.find((candidate) => candidate.className === className && !candidate.local);
       if (found) return found;
     }
     return undefined;

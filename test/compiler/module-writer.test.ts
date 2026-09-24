@@ -194,7 +194,7 @@ export class PlainComponent {}
     expect(output).toContain('.component("appPlain", { controller: PlainComponent.ɵfac, template: "<p>ng-content no es un tag acá</p>", controllerAs: "$ctrl" })');
   });
 
-  it("un @Component con selector de atributo tira error claro (no soportado todavía)", async () => {
+  it("un @Component con selector de atributo: directiva restrict A con scope aislado, bindToController y template", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(
       modulePath,
@@ -207,18 +207,21 @@ export class AppModule {}
     );
     await write(
       join(dir, "card.component.ts"),
-      `import { Component } from "ngjs-core";
+      `import { Component, Input } from "ngjs-core";
 
-@Component({ selector: "[appCard]" })
-export class CardComponent {}
+@Component({ selector: "[appCard]", template: "<b><ng-content></ng-content></b>" })
+export class CardComponent {
+  @Input() title = "";
+}
 `,
     );
 
     const scanner = new ApplicationScanner();
     await scanner.scan(dir);
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
 
-    expect(() => new ModuleWriter(scanner).write("export class AppModule {}", modulePath)).toThrow(
-      /selector de atributo.*no soportado/,
+    expect(output).toContain(
+      '.directive("appCard", function () { return { controller: CardComponent.ɵfac, template: "<b><ng-content></ng-content></b>", controllerAs: "$ctrl", transclude: true, restrict: "A", scope: {}, bindToController: {"title":"<?"} }; })',
     );
   });
 
@@ -278,7 +281,7 @@ export class ButtonLabelDirective {}
     expect(matches).toHaveLength(1);
   });
 
-  it("un @Component con una lista de selectores donde alguna alternativa no es de elemento tira error", async () => {
+  it("un @Component con una lista de selectores de elemento y de atributo: .component() y .directive() con la misma definición", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(
       modulePath,
@@ -293,16 +296,18 @@ export class AppModule {}
       join(dir, "card.component.ts"),
       `import { Component } from "ngjs-core";
 
-@Component({ selector: "app-card, [appCard]" })
+@Component({ selector: "app-card, [appCard]", template: "" })
 export class CardComponent {}
 `,
     );
 
     const scanner = new ApplicationScanner();
     await scanner.scan(dir);
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
 
-    expect(() => new ModuleWriter(scanner).write("export class AppModule {}", modulePath)).toThrow(
-      /selector de atributo.*no soportado/,
+    expect(output).toContain('.component("appCard", { controller: CardComponent.ɵfac, template: "", controllerAs: "$ctrl" })');
+    expect(output).toContain(
+      '.directive("appCard", function () { return { controller: CardComponent.ɵfac, template: "", controllerAs: "$ctrl", restrict: "A", scope: {}, bindToController: {} }; })',
     );
   });
 
