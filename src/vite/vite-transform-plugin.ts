@@ -1,7 +1,7 @@
-import { ApplicationScanner } from "@/compiler/application-scanner.ts";
-import { createNgjsCompilerTransforms } from "@/compiler/ngjs-compiler-transforms.ts";
 import { PlatformCode, type ProjectType } from "@/compiler/platform-code.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { AsyncDownlevel } from "@/compiler/async-downlevel.ts";
+import { ProjectScan } from "@/vite/project-scan.ts";
 import type { Plugin } from "vite";
 
 /**
@@ -12,46 +12,54 @@ import type { Plugin } from "vite";
  * transform interno de Vite (`vite:esbuild`) borra las anotaciones de tipo
  * antes de los plugins de prioridad normal — sin esto, `DecoratorReader` no
  * ve los tipos de los parámetros del constructor (tokens de DI de `ɵfac`).
+ *
+ * En el dev-server el escaneo se rehace con cada cambio de un `.ts` de `sourceRoot` (`ProjectScan`): un módulo
+ * nuevo tiene que entrar al grafo, y la salida de un `@NgModule` depende de archivos que no se tocaron.
  */
 export function viteTransformPlugin(
   sourceRoot: string | string[],
   extraTransforms: NgjsTransform[] = [],
   projectType: ProjectType = "application",
 ): Plugin {
-  let transforms: NgjsTransform[] = extraTransforms;
+  const scan = new ProjectScan(sourceRoot, extraTransforms);
 
   return {
     name: "ngjs-compiler",
     enforce: "pre",
     async buildStart() {
-      const scanner = new ApplicationScanner();
-      await scanner.scan(sourceRoot, { transforms: extraTransforms });
-      transforms = [...extraTransforms, ...createNgjsCompilerTransforms(scanner)];
+      await scan.rescan();
+    },
+    /**
+     * Archivo agregado/editado/borrado bajo `sourceRoot` → escaneo nuevo. Se invalida YA (sincrónico, en el mismo
+     * evento del watcher que dispara el reload de Vite) todo módulo de `sourceRoot`: el `@NgModule` que declara un
+     * componente editado cambia su salida sin haber cambiado él. El pedido que llegue después espera el escaneo.
+     */
+    configureServer(server) {
+      const onChange = (file: string) => {
+        if (!scan.covers(file)) return;
+        for (const module of server.moduleGraph.idToModuleMap.values()) {
+          if (module.id && scan.covers(module.id)) server.moduleGraph.invalidateModule(module);
+        }
+        void scan.rescan().catch(() => undefined); // el error lo ven los `transform` que esperan (`ready()`)
+      };
+      server.watcher.on("add", onChange);
+      server.watcher.on("change", onChange);
+      server.watcher.on("unlink", onChange);
     },
     // La plataforma (`globalThis.ɵngjsPlatform`) antes que los `<script type="module">` de la app — solo en una
     // aplicación (una librería no arranca nada).
     transformIndexHtml() {
       return projectType === "application" ? [PlatformCode.htmlTag()] : [];
     },
-    /**
-     * `ZonePatchesRuntime` (ver `platform-code.ts`) parchea `Promise.prototype.then`, que NO intercepta
-     * `async/await` nativo (probado en V8 real: cero intercepciones) — a `target: "es2016"` esbuild baja
-     * `async/await` a un helper basado en generadores que sí llama `.then()` por debajo, así el patch lo
-     * agarra igual. Vite usa esbuild para transformar cada archivo (dev y build), mismo mecanismo que
-     * `pluginLoader` (esbuild). Si el proyecto ya pide un `target` propio, o desactivó esbuild
-     * (`esbuild: false`), se respeta tal cual — no se pisa una elección explícita.
-     */
-    config(userConfig) {
-      if (projectType !== "application") return;
-      if (userConfig.esbuild === false) return;
-      if (userConfig.esbuild?.target !== undefined) return;
-      return { esbuild: { ...userConfig.esbuild, target: "es2016" } };
-    },
     async transform(code, id) {
+      // Dependencias que sirve el dev-server (pre-bundleadas en `.vite/deps` o no): no pasan por el compilador ni por
+      // esbuild, así que su `await` nativo se baja acá (`AsyncDownlevel`). Solo en una aplicación: una librería no
+      // lleva `ZonePatchesRuntime`.
+      if (projectType === "application" && AsyncDownlevel.isDependency(id)) return AsyncDownlevel.dependency(code, id);
       if (!id.endsWith(".ts")) return;
 
       let result = code;
-      for (const transform of transforms) {
+      for (const transform of await scan.ready()) {
         const next = await transform.transform(result, id);
         if (next !== undefined) result = next;
       }

@@ -3,6 +3,7 @@ import { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { createNgjsCompilerTransforms } from "@/compiler/ngjs-compiler-transforms.ts";
 import { PlatformCode, type ProjectType } from "@/compiler/platform-code.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { AsyncDownlevel } from "@/compiler/async-downlevel.ts";
 import type { Plugin } from "esbuild";
 
 /**
@@ -35,11 +36,11 @@ export function pluginLoader(
         build.initialOptions.banner = { ...banner, js: PlatformCode.banner(banner?.js) };
 
         // `ZonePatchesRuntime` parchea `Promise.prototype.then`, pero eso NO intercepta `async/await` nativo
-        // (probado en V8 real: cero intercepciones) — a `target: "es2016"` esbuild baja `async/await` a un
-        // helper basado en generadores que sí llama `.then()` por debajo, así el patch los agarra igual.
-        // Si el proyecto ya pide un `target` propio, se respeta tal cual (puede ser más bajo — downlevelea
-        // igual o más — o más alto a propósito, sabiendo que entonces `await` no dispara digest solo).
-        if (build.initialOptions.target === undefined) build.initialOptions.target = "es2016";
+        // (probado en V8 real: cero intercepciones). El código del proyecto ya sale sin `await` nativo
+        // (`decoratorMetadataTransform`); esto baja solo esa sintaxis en lo que no pasa por el compilador
+        // (dependencias en `node_modules`), sin tocar el `target` — como Angular CLI con Zone.js. Una clave
+        // que el build ya fije a mano se respeta.
+        build.initialOptions.supported = { ...AsyncDownlevel.SUPPORTED, ...build.initialOptions.supported };
       }
 
       // Si el escaneo falla no hay grafo: se corta ahí con ESE error, en vez de seguir cargando TypeScript crudo

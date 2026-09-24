@@ -1648,6 +1648,97 @@ const modules: Record<string, unknown> = { app: AppModule };
     expect(injector.get<{ source(): string }>(TokenName.of("Logger", "test-app")).source()).toBe("module");
   });
 
+  it("un providedIn: 'root' evaluado DESPUÉS del bootstrap (chunk lazy) queda disponible en la app viva, sin pisar lo ya registrado", async () => {
+    await write(
+      "logger.ts",
+      `import { Injectable } from "ngjs-core";
+
+@Injectable({ providedIn: "root" })
+export class Logger {
+  source(): string { return "root"; }
+}
+`,
+    );
+    await write(
+      "app.component.ts",
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-root", template: "<p>app</p>" })
+export class AppComponent {}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { AppComponent } from "./app.component";
+import { Logger } from "./logger";
+
+@NgModule({ declarations: [AppComponent], imports: [], providers: [Logger], bootstrap: [AppComponent] })
+export class AppModule {}
+`,
+    );
+    // Solo lo importa el "chunk lazy": en el bundle inicial no existe (como `BreakpointObserver` de ngjs-core/cdk).
+    await write(
+      "late.service.ts",
+      `import { Injectable } from "ngjs-core";
+import { Logger } from "./logger";
+
+@Injectable({ providedIn: "root" })
+export class LateService {
+  constructor(private logger: Logger) {}
+  hello(): string { return "late + " + this.logger.source(); }
+}
+`,
+    );
+    await write("lazy.ts", `export { LateService } from "./late.service";\n`);
+    await mkdir(join(dir, "node_modules", "ngjs-core"), { recursive: true });
+    await writeFile(join(dir, "node_modules", "ngjs-core", "package.json"), JSON.stringify({ name: "ngjs-core", main: "index.js" }), "utf8");
+    await writeFile(
+      join(dir, "node_modules", "ngjs-core", "index.js"),
+      `export const platformBrowserDynamic = () => globalThis.ɵngjsPlatform;\n`,
+      "utf8",
+    );
+    await write(
+      "main.ts",
+      `import { platformBrowserDynamic } from "ngjs-core";
+import { AppModule } from "./app.module";
+
+(window as unknown as { app: Promise<unknown> }).app = platformBrowserDynamic().bootstrapModule(AppModule);
+`,
+    );
+
+    const bundle = async (entry: string) =>
+      (
+        await build({
+          entryPoints: [join(dir, entry)],
+          bundle: true,
+          write: false,
+          format: "iife",
+          logLevel: "silent",
+          nodePaths: [NODE_MODULES],
+          plugins: [pluginLoader(dir)],
+        })
+      ).outputFiles[0]!.text;
+    const [main, lazy] = [await bundle("main.ts"), await bundle("lazy.ts")];
+
+    const dom = new JSDOM(`<body></body>`, { runScripts: "outside-only" });
+    dom.window.eval(main);
+    const injector = await (dom.window as unknown as { app: Promise<auto.IInjectorService> }).app;
+    const late = TokenName.of("LateService", "test-app");
+    expect(injector.has(late)).toBe(false);
+
+    // El chunk lazy se evalúa con la app ya corriendo: su `providedIn: "root"` se anota en la cola.
+    dom.window.eval(lazy);
+    expect(injector.get<{ hello(): string }>(late).hello()).toBe("late + root");
+
+    // Un token ya registrado (el `Logger` del `@NgModule`) no lo pisa una anotación tardía.
+    const logger = TokenName.of("Logger", "test-app");
+    const before = injector.get(logger);
+    const queue = (dom.window as unknown as { ɵngjsRootProviders: unknown[][] }).ɵngjsRootProviders;
+    queue.push([logger, [() => ({ source: () => "impostor" })]]);
+    expect(injector.get(logger)).toBe(before);
+  });
+
   it("DI de Angular 16 por la plataforma: InjectionToken con factory, @Injectable con receta, useFactory con inject(), [new Optional(), X], @Attribute y forwardRef", async () => {
     await write(
       "tokens.ts",
@@ -1799,6 +1890,8 @@ import { AppModule } from "./app.module";
       bundle: true,
       write: false,
       format: "iife",
+      // El target que usa `ngjs build`: no alcanza con bajarlo — el `await` lo baja el compilador (SWC).
+      target: "es2022",
       logLevel: "silent",
       nodePaths: [NODE_MODULES],
       plugins: [pluginLoader(dir)],
@@ -1816,10 +1909,14 @@ import { AppModule } from "./app.module";
     };
     const text = () => el.querySelector("span")!.textContent;
 
-    // async/await real (no un .then() escrito a mano) — depende de que esbuild haya bajado el target
-    // a es2016 (helper basado en generadores que sí llama .then() por debajo) y de que Promise.prototype.then
+    // async/await real (no un .then() escrito a mano) — depende de que el compilador lo haya bajado a
+    // generadores (helper que sí llama .then() por debajo, aun con target es2022) y de que Promise.prototype.then
     // esté parcheado. Sin esto, `value` cambiaría pero la vista NUNCA se enteraría.
-    await controller.loadAsync();
+    // Sin `await` desde acá: la promesa es de otro realm (jsdom) y el `await` de Node le llamaría `.then()` (el
+    // parcheado), disparando el digest aunque el `await` de adentro fuera nativo. Se espera con el `setTimeout` de
+    // Node (no parcheado), como un `ng-click` que no mira la promesa.
+    void controller.loadAsync();
+    await new Promise((resolve) => setTimeout(resolve, 10));
     expect(text()).toBe("2");
 
     // setTimeout nativo.

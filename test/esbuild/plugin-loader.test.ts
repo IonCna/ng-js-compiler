@@ -70,6 +70,27 @@ describe("pluginLoader", () => {
     expect(text.indexOf("/* propio */")).toBeGreaterThan(text.indexOf("globalThis.ɵngjsPlatform ="));
   });
 
+  it("en una aplicación baja async/await de las dependencias (lo que no pasa por el compilador) sin tocar el target", async () => {
+    const dep = join(dir, "dep.js");
+    await writeFile(dep, "export async function depLoad(x) { const v = await x; return v?.ok ?? false; }\n");
+    const file = join(dir, "entry.ts");
+    await writeFile(file, `export { depLoad } from "./dep.js";`);
+
+    const result = await esbuild.build({
+      entryPoints: [file],
+      bundle: true,
+      write: false,
+      format: "esm",
+      target: "es2022",
+      plugins: [pluginLoader(dir)],
+    });
+
+    const bundle = result.outputFiles[0]!.text.slice(PlatformCode.source().length);
+    expect(bundle).toContain("depLoad");
+    expect(bundle).not.toMatch(/\bawait\b/);
+    expect(bundle).toContain("?."); // target es2022 intacto: solo se bajó async/await
+  });
+
   it("en una librería no inyecta la plataforma (una librería no arranca nada)", async () => {
     const file = join(dir, "entry.ts");
     await writeFile(file, "export const x = 1;");

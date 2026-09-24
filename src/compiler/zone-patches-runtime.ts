@@ -15,10 +15,10 @@
  *   función contra el wrapper, no el original — un patrón MUY común, `WeakMap` guarda la relación).
  * - `Promise.prototype.then` — cubre cadenas `.then()` explícitas, PERO NO `async/await` de verdad: se
  *   probó en el motor real (Node/V8 actual) y el patch de `.then` da CERO intercepciones en `await`
- *   (optimización interna de V8, no hay vuelta). Por eso el build fuerza `target: "es2016"` en esbuild
- *   (ver `plugin-loader.ts`) y en Vite (`viteTransformPlugin`) — a ese target, `async/await` del proyecto
- *   se compila a un helper basado en generadores que SÍ llama `.then()` por debajo (confirmado con esbuild
- *   real), así el patch los agarra igual, indirectamente.
+ *   (optimización interna de V8, no hay vuelta). Por eso el compilador baja SIEMPRE `async/await` a
+ *   generadores (`decoratorMetadataTransform`, con SWC) y `pluginLoader` hace lo mismo con las dependencias
+ *   (`supported` de esbuild, `AsyncDownlevel`) — el helper reanuda con `.then()`, así el patch los agarra igual,
+ *   indirectamente, sin bajar el resto de la sintaxis (como Angular CLI con Zone.js).
  *
  * `NgZone.runOutsideAngular` (de `ngjs-core`) marca `globalThis.ɵngjsOutsideAngular` mientras corre: lo programado ahí
  * no dispara digest (se decide al programar, como la zona de Angular).

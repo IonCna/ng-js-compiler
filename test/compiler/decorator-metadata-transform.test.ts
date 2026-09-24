@@ -27,4 +27,24 @@ describe("decoratorMetadataTransform", () => {
 
     await expect(decoratorMetadataTransform.transform(code, "plain.ts")).resolves.toBeDefined();
   });
+
+  it("baja async/await y for await a generadores (reanudan con .then(), el que parchea la zona); el resto queda ES2022", async () => {
+    const code = `
+      class Loader {
+        #cache = new Map<string, unknown>();
+        async load(url: string) { const res = await fetch(url); return res?.ok ?? false; }
+        async drain(items: AsyncIterable<number>) { for await (const item of items) this.#cache.set(String(item), item); }
+      }
+      export const arrow = async () => await Promise.resolve(1);
+      export async function* stream() { yield await Promise.resolve(1); }
+    `;
+
+    const result = (await decoratorMetadataTransform.transform(code, "loader.ts"))!;
+
+    expect(result).not.toMatch(/\bawait\b/);
+    expect(result).not.toMatch(/\basync\s+(function|\(|\w+\s*\()/);
+    expect(result).toContain(".then(");
+    expect(result).toContain("#cache"); // privados nativos: no se bajó el target
+    expect(result).toContain("?.");
+  });
 });

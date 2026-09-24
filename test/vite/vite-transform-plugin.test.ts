@@ -61,36 +61,33 @@ describe("viteTransformPlugin", () => {
     expect(plugin.transformIndexHtml()).toEqual([]);
   });
 
-  it("config(): fuerza target 'es2016' en una aplicación si el proyecto no pidió uno propio", () => {
-    const plugin = viteTransformPlugin(".", []);
-    // @ts-expect-error — `config` en el tipo `Plugin` de Vite puede ser objeto/función; acá siempre es función.
-    expect(plugin.config({})).toEqual({ esbuild: { target: "es2016" } });
+  it("no fija opciones de esbuild/oxc: el `async/await` lo baja el compilador (SWC), no el target de Vite", () => {
+    expect(viteTransformPlugin(".", []).config).toBeUndefined();
   });
 
-  it("config(): no pisa un target que el proyecto ya pidió", () => {
-    const plugin = viteTransformPlugin(".", []);
-    // @ts-expect-error — ver nota arriba.
-    expect(plugin.config({ esbuild: { target: "es2020" } })).toBeUndefined();
-  });
+  describe("dependencias en el dev-server (node_modules, incluido .vite/deps)", () => {
+    const dependency = "export async function load(x) { const v = await x; return v?.ok ?? false; }\n";
+    // @ts-expect-error — `transform` en el tipo `Plugin` de Vite puede ser objeto/función; acá siempre es función.
+    const run = (plugin: ReturnType<typeof viteTransformPlugin>, code: string, id: string) => plugin.transform(code, id);
 
-  it("config(): respeta esbuild: false (el proyecto lo desactivó a propósito)", () => {
-    const plugin = viteTransformPlugin(".", []);
-    // @ts-expect-error — ver nota arriba.
-    expect(plugin.config({ esbuild: false })).toBeUndefined();
-  });
-
-  it("config(): conserva el resto de las opciones de esbuild que ya hubiera", () => {
-    const plugin = viteTransformPlugin(".", []);
-    // @ts-expect-error — ver nota arriba.
-    expect(plugin.config({ esbuild: { jsxInject: "import React from 'react'" } })).toEqual({
-      esbuild: { jsxInject: "import React from 'react'", target: "es2016" },
+    it("baja su async/await a generadores (sin await nativo) y conserva el resto de la sintaxis, con sourcemap", async () => {
+      const id = "/app/node_modules/.vite/deps/some-lib.js?v=1a2b3c4d";
+      const result = (await run(viteTransformPlugin(".", []), dependency, id)) as { code: string; map?: string };
+      expect(result.code).not.toMatch(/\bawait\b/);
+      expect(result.code).toContain(".then(");
+      expect(result.code).toContain("?.");
+      expect(result.map).toBeTruthy();
     });
-  });
 
-  it("config(): en una librería no toca nada", () => {
-    const plugin = viteTransformPlugin(".", [], "library");
-    // @ts-expect-error — ver nota arriba.
-    expect(plugin.config({})).toBeUndefined();
+    it("una dependencia sin await queda intacta (no pasa por SWC)", async () => {
+      const result = await run(viteTransformPlugin(".", []), "export const x = 1;\n", "/app/node_modules/angular/index.js");
+      expect(result).toBeUndefined();
+    });
+
+    it("no toca .js fuera de node_modules, ni nada en una librería", async () => {
+      expect(await run(viteTransformPlugin(".", []), dependency, "/app/src/legacy.js")).toBeUndefined();
+      expect(await run(viteTransformPlugin(".", [], "library"), dependency, "/app/node_modules/x/index.mjs")).toBeUndefined();
+    });
   });
 
   it("devuelve undefined si ningún transform cambió el código", async () => {

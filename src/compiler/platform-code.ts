@@ -49,6 +49,8 @@ export class PlatformCode {
             var providers = angular.module(${JSON.stringify(ROOT_PROVIDERS_MODULE)}, [])${ResolveDependency.factoryFragment()};
             globalThis.${ROOT_PROVIDERS_GLOBAL}.forEach(function (provider) { providers.factory(provider[0], provider[1]); });
             providers.config(${PlatformCode.rootDefaultsConfig()});
+            var registerLateRoot;
+            providers.config(${PlatformCode.lateRootConfig("registerLateRoot")});
             angular.module(${JSON.stringify(ROOT_MODULE)}, [${JSON.stringify(ROOT_PROVIDERS_MODULE)}, moduleType.ɵmod.id]);
             var host = document.body;
             (moduleType.ɵmod.bootstrap || []).forEach(function (tag) { if (!host.querySelector(tag)) host.appendChild(document.createElement(tag)); });
@@ -57,6 +59,7 @@ export class PlatformCode {
             // $rootScope para saber a qué aplicarle $apply — no existe hasta que el bootstrap de verdad corrió.
             globalThis.${ROOT_SCOPE_GLOBAL} = injector.get("$rootScope");
             globalThis.${INJECTOR_GLOBAL} = injector;
+            ${PlatformCode.lateRootHook("registerLateRoot")}
             var initializers = globalThis.ɵngjsAppInitializers || [];
             globalThis.ɵngjsAppInitializers = [];
             Promise.all(initializers.map(function (initializer) { return initializer(injector); })).then(function () {
@@ -90,6 +93,43 @@ ${ZonePatchesRuntime.source()}`;
                 };
               });
             }]`;
+  }
+
+  /**
+   * `.config` de `ɵroot.providers` (después de `rootDefaultsConfig`, así usa su `$provide` ya envuelto): deja en
+   * `variable` cómo registrar un `providedIn: "root"` que se evalúa DESPUÉS del bootstrap — un servicio que solo
+   * importa un chunk lazy (`loadChildren`), en Angular igual de disponible que uno del bundle inicial.
+   * `$provide.factory` después del bootstrap anda: el instance injector busca `<token>Provider` en el provider cache
+   * recién cuando alguien lo pide. Un token ya registrado (por un `@NgModule` o por la cola inicial) no se pisa.
+   */
+  static lateRootConfig(variable: string): string {
+    return `["$provide", "$injector", function ($provide, providerInjector) {
+              ${variable} = function (provider) {
+                if (providerInjector.has(provider[0] + "Provider")) return;
+                $provide.factory(provider[0], provider[1]);
+                if (providerInjector.${ROOT_DEFAULTS}) providerInjector.${ROOT_DEFAULTS}[provider[0]] = true;
+              };
+            }]`;
+  }
+
+  /**
+   * Después del bootstrap: cada `push` nuevo a la cola (`rootProviderStatement` de un archivo recién evaluado) se
+   * registra también en cada app viva. El `push` se envuelve una sola vez por página; cada bootstrap suma su
+   * registrador (varias apps, o una por test).
+   */
+  static lateRootHook(variable: string): string {
+    return `var queue = globalThis.${ROOT_PROVIDERS_GLOBAL};
+            if (!queue.ɵlateRoot) {
+              var push = queue.push;
+              queue.ɵlateRoot = [];
+              queue.push = function () {
+                var added = Array.prototype.slice.call(arguments);
+                var length = push.apply(queue, added);
+                added.forEach(function (provider) { queue.ɵlateRoot.forEach(function (register) { register(provider); }); });
+                return length;
+              };
+            }
+            queue.ɵlateRoot.push(${variable});`;
   }
 
   /**
