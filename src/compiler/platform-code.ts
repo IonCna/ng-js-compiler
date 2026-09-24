@@ -10,6 +10,8 @@ const ROOT_SCOPE_GLOBAL = "ɵngjsRootScope";
 const INJECTOR_GLOBAL = "ɵngjsInjector";
 const ROOT_MODULE = "ɵroot";
 const ROOT_PROVIDERS_MODULE = "ɵroot.providers";
+/** Propiedad del injector de providers con los tokens que solo tienen su default de raíz (ver `rootDefaultsConfig`). */
+export const ROOT_DEFAULTS = "ɵrootDefaults";
 
 /**
  * La plataforma que el build deja en `globalThis.ɵngjsPlatform` — el contrato que consume
@@ -46,6 +48,7 @@ export class PlatformCode {
             // aunque ningún \`@NgModule\` del proyecto lo registre (ver \`ResolveDependency\`).
             var providers = angular.module(${JSON.stringify(ROOT_PROVIDERS_MODULE)}, [])${ResolveDependency.factoryFragment()};
             globalThis.${ROOT_PROVIDERS_GLOBAL}.forEach(function (provider) { providers.factory(provider[0], provider[1]); });
+            providers.config(${PlatformCode.rootDefaultsConfig()});
             angular.module(${JSON.stringify(ROOT_MODULE)}, [${JSON.stringify(ROOT_PROVIDERS_MODULE)}, moduleType.ɵmod.id]);
             var host = document.body;
             (moduleType.ɵmod.bootstrap || []).forEach(function (tag) { if (!host.querySelector(tag)) host.appendChild(document.createElement(tag)); });
@@ -66,6 +69,27 @@ export class PlatformCode {
   };
 })();
 ${ZonePatchesRuntime.source()}`;
+  }
+
+  /**
+   * `.config` de `ɵroot.providers`: anota en el injector de providers (`ɵrootDefaults`) qué tokens tienen solo su
+   * default `providedIn: "root"`. En Angular ese default no es un provider más: si un módulo aporta providers
+   * `multi` para el token (un `InjectionToken` con `factory`), los multi lo reemplazan sin error de "mezcla"
+   * (`MultiProvidersRuntime` consulta la marca). Corre después de la cola de `ɵroot.providers` y antes que la de
+   * cualquier `@NgModule`; un registro posterior del token (un provider no-multi de un módulo) borra la marca.
+   */
+  static rootDefaultsConfig(): string {
+    return `["$provide", "$injector", function ($provide, providerInjector) {
+              var defaults = providerInjector.${ROOT_DEFAULTS} = {};
+              globalThis.${ROOT_PROVIDERS_GLOBAL}.forEach(function (provider) { defaults[provider[0]] = true; });
+              ["provider", "factory", "service", "value", "constant"].forEach(function (method) {
+                var original = $provide[method];
+                $provide[method] = function (name) {
+                  if (typeof name === "string") delete defaults[name];
+                  return original.apply(this, arguments);
+                };
+              });
+            }]`;
   }
 
   /**

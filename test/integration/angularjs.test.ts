@@ -946,6 +946,82 @@ export class AppModule {}
     });
   });
 
+  /** El default `providedIn: "root"` vive en `ɵroot.providers`: estos pasan por `bootstrapModule()` de la plataforma. */
+  describe("InjectionToken con factory de raíz + providers multi de módulos", () => {
+    async function bootstrapWithPlatform(featureProvider: string, ownProvider: string): Promise<auto.IInjectorService> {
+      await write(
+        "tokens.ts",
+        `class InjectionToken<T> { constructor(readonly description: string, readonly options?: object) {} }
+export const HOOKS = new InjectionToken<string[]>("hooks", { factory: () => ["default"] });
+`,
+      );
+      await write(
+        "feature.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [], providers: [${featureProvider}] })
+export class FeatureModule {}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { FeatureModule } from "./feature.module";
+import { HOOKS } from "./tokens";
+
+@NgModule({ declarations: [], imports: [FeatureModule], providers: [${ownProvider}] })
+export class AppModule {}
+`,
+      );
+      await mkdir(join(dir, "node_modules", "ngjs-core"), { recursive: true });
+      await writeFile(join(dir, "node_modules", "ngjs-core", "package.json"), JSON.stringify({ name: "ngjs-core", main: "index.js" }), "utf8");
+      await writeFile(join(dir, "node_modules", "ngjs-core", "index.js"), `export const platformBrowserDynamic = () => globalThis.ɵngjsPlatform;\n`, "utf8");
+      await write(
+        "main.ts",
+        `import { platformBrowserDynamic } from "ngjs-core";
+import { AppModule } from "./app.module";
+import "./tokens"; // sin esto, si ningún módulo usa HOOKS, el token (y su factory) no entra al bundle
+
+(window as unknown as { app: Promise<unknown> }).app = platformBrowserDynamic().bootstrapModule(AppModule);
+`,
+      );
+      const result = await build({
+        entryPoints: [join(dir, "main.ts")],
+        bundle: true,
+        write: false,
+        format: "iife",
+        logLevel: "silent",
+        nodePaths: [NODE_MODULES],
+        plugins: [pluginLoader(dir)],
+      });
+      const dom = new JSDOM(`<body></body>`, { runScripts: "outside-only" });
+      dom.window.eval(result.outputFiles[0]!.text);
+      return (await (dom.window as unknown as { app: Promise<unknown> }).app) as auto.IInjectorService;
+    }
+
+    const hooks = () => TokenName.of("HOOKS", "test-app");
+
+    it("sin providers de módulos, el token se resuelve con su factory", async () => {
+      const injector = await bootstrapWithPlatform("", "");
+      expect(injector.get(hooks())).toEqual(["default"]);
+    });
+
+    it("los multi de los módulos reemplazan al default del factory (no es 'mezcla'), como en Angular", async () => {
+      const injector = await bootstrapWithPlatform(
+        `{ provide: HOOKS, useValue: "feature", multi: true }`,
+        `{ provide: HOOKS, useValue: "own", multi: true }`,
+      );
+      expect(injector.get(hooks())).toEqual(["feature", "own"]);
+    });
+
+    it("un no-multi de un módulo sigue siendo mezcla con los multi de otro, aunque el token tenga factory", async () => {
+      await expect(
+        bootstrapWithPlatform(`{ provide: HOOKS, useValue: "feature" }`, `{ provide: HOOKS, useValue: "own", multi: true }`),
+      ).rejects.toThrow(/mezcla providers multi y no-multi para el token ".*" entre módulos/);
+    });
+  });
+
   describe("ModuleWithProviders con una clase como token", () => {
     async function logModule(loggerDecorator: string): Promise<void> {
       await write(

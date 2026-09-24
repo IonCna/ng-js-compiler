@@ -8,7 +8,9 @@
  * registro tiene todos los aportes, en el orden de Angular: importados → `ModuleWithProviders` → propios. La
  * lista vive en el injector de providers (uno por `angular.bootstrap`), no en una global.
  *
- * Mezclar multi y no-multi entre módulos es error, como en Angular, sin importar el orden:
+ * Mezclar multi y no-multi entre módulos es error, como en Angular, sin importar el orden (el default
+ * `providedIn: "root"` de un `InjectionToken` con `factory` no cuenta: los multi lo reemplazan, ver
+ * `PlatformCode.rootDefaultsConfig`):
  * - no-multi ANTES: el token ya está registrado y no por esta lista.
  * - no-multi DESPUÉS (un módulo que carga más tarde, o su cola corre después de este `.config`): la primera vez
  *   se envuelven los métodos de registro de `$provide` — el objeto por el que pasa TODA la cola de registros de
@@ -34,7 +36,9 @@ function ɵmultiProviders($provide, providers, token, members) {
       };
     });
   }
-  if (!state.tokens[token] && providers.has(token + "Provider")) throw ɵmultiMixError(token);
+  // Un default \`providedIn: "root"\` (\`InjectionToken\` con \`factory\`) no cuenta como no-multi: los multi lo reemplazan.
+  var rootDefault = providers.ɵrootDefaults && providers.ɵrootDefaults[token];
+  if (!state.tokens[token] && providers.has(token + "Provider") && !rootDefault) throw ɵmultiMixError(token);
   state.tokens[token] = (state.tokens[token] || []).concat(members);
   state.factory(token, state.tokens[token].concat([function () { return Array.prototype.slice.call(arguments); }]));
 }
