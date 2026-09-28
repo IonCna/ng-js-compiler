@@ -284,7 +284,7 @@ export class ModuleWriter {
       ];
       if (options.template !== undefined) fields.push(`template: ${JSON.stringify(options.template)}`);
       if (options.templateUrl !== undefined) fields.push(`templateUrl: ${JSON.stringify(options.templateUrl)}`);
-      if (ComponentDefinition.projectsContent(options.template)) fields.push("transclude: true");
+      if (ComponentDefinition.transcludes(metadata)) fields.push("transclude: true");
 
       return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${fields.join(", ")} }; })`;
     });

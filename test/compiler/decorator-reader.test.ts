@@ -473,6 +473,7 @@ describe("decoratorReaderTransform", () => {
         @Input({ binding: "@" }) label!: string;
         @Output({ alias: "changed" }) change = new EventEmitter();
         @HostBinding("class.active") get active(): boolean { return true; }
+        @Input() format(value: number): string { return String(value); }
       }
     `;
 
@@ -483,7 +484,9 @@ describe("decoratorReaderTransform", () => {
       { propName: "value", bindingName: "value" },
       { propName: "named", bindingName: "aka" },
       { propName: "label", bindingName: "label", mode: "@" },
+      { propName: "format", bindingName: "format" },
     ]);
+    expect(result).toContain("format(value: number): string");
     expect(metadata.outputs).toEqual([{ propName: "change", bindingName: "changed" }]);
     expect(metadata.hostBindings).toEqual([{ propName: "active", hostProperty: "class.active" }]);
     expect(result).not.toMatch(/@(Input|Output|HostBinding)/);

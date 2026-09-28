@@ -194,6 +194,40 @@ export class PlainComponent {}
     expect(output).toContain('.component("appPlain", { controller: PlainComponent.ɵfac, template: "<p>ng-content no es un tag acá</p>", controllerAs: "$ctrl" })');
   });
 
+  it("un @Component con @ContentChild y sin <ng-content> también transcluye (sus content queries ven el contenido)", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+import { PagerComponent, MarkerDirective } from "./pager.component.ts";
+
+@NgModule({ declarations: [PagerComponent, MarkerDirective] })
+export class AppModule {}
+`,
+    );
+    await write(
+      join(dir, "pager.component.ts"),
+      `import { Component, ContentChild, Directive, ViewChild } from "ngjs-core";
+
+@Directive({ selector: "[appMarker]" })
+export class MarkerDirective {}
+
+@Component({ selector: "app-pager", template: "<ul></ul>" })
+export class PagerComponent {
+  @ContentChild(MarkerDirective) marker?: MarkerDirective;
+  @ViewChild("x") x?: unknown;
+}
+`,
+    );
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+    expect(output).toContain('.component("appPager", { controller: PagerComponent.ɵfac, template: "<ul></ul>", controllerAs: "$ctrl", transclude: true })');
+    expect(output).not.toMatch(/"appMarker"[^)]*transclude/);
+  });
+
   it("un @Component con selector de atributo: directiva restrict A con scope aislado, bindToController y template", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(

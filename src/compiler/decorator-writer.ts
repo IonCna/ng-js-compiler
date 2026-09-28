@@ -186,7 +186,11 @@ export class DecoratorWriter {
 
     const tags = JSON.stringify(requiredTags.map((tag) => tag.toLowerCase()));
     const warning = JSON.stringify(`${metadata.className}: este selector requiere <${requiredTags.join("> o <")}>, no se aplica en <`);
-    return `if (${tags}.indexOf($element[0].tagName.toLowerCase()) === -1) { console.warn(${warning} + $element[0].tagName.toLowerCase() + ">."); return {}; }`;
+    // Sobre `<ng-template>` la directiva queda en el comentario ancla de `ngTemplate` (transclusión de elemento):
+    // ese nodo no tiene `tagName`, pero es el `<ng-template>`.
+    const tag =
+      '($element[0].nodeType === 8 && /ngTemplate/.test($element[0].nodeValue) ? "ng-template" : String($element[0].tagName || $element[0].nodeName).toLowerCase())';
+    return `var ɵtag = ${tag}; if (${tags}.indexOf(ɵtag) === -1) { console.warn(${warning} + ɵtag + ">."); return {}; }`;
   }
 
   /** `undefined` = sin guard: selector no parseable acá, o alguna alternativa de la lista no exige tag. */

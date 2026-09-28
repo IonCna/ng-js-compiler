@@ -219,7 +219,7 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class ButtonLabel {}", "button-label.ts")!;
 
     expect(output).toContain(
-      'if (["button"].indexOf($element[0].tagName.toLowerCase()) === -1) { console.warn("ButtonLabel: este selector requiere <button>, no se aplica en <" + $element[0].tagName.toLowerCase() + ">."); return {}; }',
+      'if (["button"].indexOf(ɵtag) === -1) { console.warn("ButtonLabel: este selector requiere <button>, no se aplica en <" + ɵtag + ">."); return {}; }',
     );
 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -243,6 +243,26 @@ describe("DecoratorWriter", () => {
     warn.mockRestore();
   });
 
+  it("ng-template[x]: acepta el comentario ancla de ngTemplate (sin tagName) como <ng-template>", () => {
+    const directive: DirectiveMetadata = {
+      ...component({ className: "PageTpl" }),
+      kind: "directive",
+      options: { selector: "ng-template[ngbPageTpl]" },
+    };
+    MetadataStore.set("page-tpl.ts", [directive]);
+
+    const output = DecoratorWriter.write("class PageTpl {}", "page-tpl.ts")!;
+    const PageTpl = evaluate(output, "PageTpl") as unknown as new () => object;
+    const fac = (PageTpl as unknown as { ɵfac: unknown }).ɵfac as [string, string, (element: unknown, scope: unknown) => object];
+
+    expect(fac[2]({ 0: { nodeType: 8, nodeName: "#comment", nodeValue: " ngTemplate: " } }, {})).toBeInstanceOf(PageTpl);
+    expect(fac[2]({ 0: { nodeType: 1, tagName: "NG-TEMPLATE" } }, {})).toBeInstanceOf(PageTpl);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(fac[2]({ 0: { nodeType: 8, nodeName: "#comment", nodeValue: " ngIf: x " } }, {})).not.toBeInstanceOf(PageTpl);
+    expect(warn).toHaveBeenCalledWith("PageTpl: este selector requiere <ng-template>, no se aplica en <#comment>.");
+    warn.mockRestore();
+  });
+
   it("lista por coma, todas compuestas con el mismo atributo (\"button[x], label[x]\"): el guard acepta cualquiera de los tags", () => {
     const directive: DirectiveMetadata = {
       ...component({ className: "ButtonLabel" }),
@@ -253,7 +273,7 @@ describe("DecoratorWriter", () => {
 
     const output = DecoratorWriter.write("class ButtonLabel {}", "button-label.ts")!;
 
-    expect(output).toContain('if (["button","label"].indexOf($element[0].tagName.toLowerCase()) === -1)');
+    expect(output).toContain('if (["button","label"].indexOf(ɵtag) === -1)');
 
     const ButtonLabel = evaluate(output, "ButtonLabel") as unknown as new () => object;
     const fac = (ButtonLabel as unknown as { ɵfac: unknown }).ɵfac as [

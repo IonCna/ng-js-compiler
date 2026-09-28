@@ -659,7 +659,10 @@ export class DecoratorReader {
             continue;
           }
           // `@Input() set value(v)` / `@HostBinding("class.x") get isX()` — un accessor es un binding como un campo.
-          if ((member.kind === "getter" || member.kind === "setter") && DecoratorReader.readPropertyBinding(decorator, bindings, name, owner)) {
+          // `@Input() format(x) {...}` (un método): como en Angular, el binding pisa el método por defecto.
+          const accessor = member.kind === "getter" || member.kind === "setter";
+          const methodInput = member.kind === "method" && DecoratorReader.decoratorCallName(decorator) === "Input";
+          if ((accessor || methodInput) && DecoratorReader.readPropertyBinding(decorator, bindings, name, owner)) {
             stripSpans.push(decorator.span);
             continue;
           }

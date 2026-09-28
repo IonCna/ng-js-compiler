@@ -27,7 +27,7 @@ export class ComponentDefinition {
       ...(options.templateUrl !== undefined && { templateUrl: options.templateUrl }),
       ...(controllerAs !== undefined && { controllerAs }),
       ...(Object.keys(bindings).length && { bindings }),
-      ...(ComponentDefinition.projectsContent(options.template) && { transclude: true }),
+      ...(ComponentDefinition.transcludes(metadata) && { transclude: true }),
     };
   }
 
@@ -45,7 +45,7 @@ export class ComponentDefinition {
       ...(options.template !== undefined && { template: options.template }),
       ...(options.templateUrl !== undefined && { templateUrl: options.templateUrl }),
       ...(options.controllerAs !== undefined && { controllerAs: options.controllerAs }),
-      ...(ComponentDefinition.projectsContent(options.template) && { transclude: true }),
+      ...(ComponentDefinition.transcludes(metadata) && { transclude: true }),
     };
   }
 
@@ -56,5 +56,18 @@ export class ComponentDefinition {
    */
   static projectsContent(template: string | undefined): boolean {
     return template !== undefined && /<ng-content[\s>/]/.test(template);
+  }
+
+  /**
+   * `transclude: true` con `<ng-content>` o con `@ContentChild(ren)` (propias o heredadas) en algo que tiene template:
+   * en Angular el contenido se instancia (y lo ven sus content queries) aunque el template no lo proyecte — como
+   * `NgbPagination` con sus `<ng-template ngbPaginationFirst>`. Sin `transclude`, AngularJS lo tira al poner el
+   * template. Una `@Directive` sin template no: su contenido es el light DOM.
+   */
+  static transcludes(metadata: { options: unknown; queries?: { kind: string }[] }): boolean {
+    const options = metadata.options as { template?: string; templateUrl?: string };
+    if (ComponentDefinition.projectsContent(options.template)) return true;
+    const hasTemplate = options.template !== undefined || options.templateUrl !== undefined;
+    return hasTemplate && (metadata.queries ?? []).some((query) => query.kind === "content");
   }
 }
