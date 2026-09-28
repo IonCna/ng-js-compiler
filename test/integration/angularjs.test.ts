@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { IAngularStatic, auto } from "angular";
-import { build } from "esbuild";
+import { build, type Plugin } from "esbuild";
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HashId } from "@/compiler/hash-id.ts";
@@ -37,6 +37,21 @@ describe("compilado corriendo sobre AngularJS real", () => {
     await writeFile(join(dir, file), code, "utf8");
   }
 
+  /**
+   * `ngjs-core` de mentira: lo único que sobrevive en runtime de sus imports es el `inject()` de respaldo de los campos
+   * (`InjectedValues.ref`), que en estos fixtures siempre se construyen por `ɵfac`.
+   */
+  const coreStub: Plugin = {
+    name: "ngjs-core-stub",
+    setup(stub) {
+      stub.onResolve({ filter: /^ngjs-core$/ }, () => ({ path: "ngjs-core", namespace: "ngjs-core-stub" }));
+      stub.onLoad({ filter: /.*/, namespace: "ngjs-core-stub" }, () => ({
+        contents: 'export function inject() { throw new Error("inject() fuera de un ɵfac"); }',
+        loader: "js",
+      }));
+    },
+  };
+
   /** Compila `main.ts` → corre el bundle en jsdom → bootstrap de `AppModule` (de `app.module.ts`). */
   async function bootstrap(html: string): Promise<{ dom: JSDOM; angular: IAngularStatic; injector: auto.IInjectorService }> {
     const result = await build({
@@ -46,7 +61,7 @@ describe("compilado corriendo sobre AngularJS real", () => {
       format: "iife",
       logLevel: "silent",
       nodePaths: [NODE_MODULES],
-      plugins: [pluginLoader(dir)],
+      plugins: [pluginLoader(dir), coreStub],
     });
 
     const dom = new JSDOM(`<div id="app">${html}</div>`, { runScripts: "outside-only" });

@@ -9,9 +9,16 @@ export class InjectedValues {
   static readonly FACTORY = "ɵfactory";
   private static readonly GLOBAL = "globalThis.ɵngjsInjected";
 
-  /** El texto que reemplaza al `inject()` número `index` de `owner`. */
-  static ref(owner: string, index: number): string {
-    return `${InjectedValues.GLOBAL}[${JSON.stringify(owner)}][${index}]`;
+  /**
+   * El texto que reemplaza al `inject()` número `index` de `owner`. Con `fallback` (el `inject(...)` original), fuera
+   * de una construcción por `ɵfac` — `new Clase()` dentro de `runInInjectionContext()`/`TestBed.runInInjectionContext()`,
+   * como en Angular — se usa el `inject()` de runtime.
+   */
+  static ref(owner: string, index: number, fallback?: string): string {
+    const key = JSON.stringify(owner);
+    const value = `${InjectedValues.GLOBAL}[${key}][${index}]`;
+    if (fallback === undefined) return value;
+    return `(${InjectedValues.GLOBAL} && ${InjectedValues.GLOBAL}[${key}] ? ${value} : ${fallback})`;
   }
 
   /** `statement` corriendo con `values` (`{ dueño: [valores...] }`) expuestos; se restaura lo anterior al terminar. */

@@ -223,9 +223,10 @@ describe("decoratorReaderTransform", () => {
       const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
       const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
 
-      expect(result).toContain('private http = globalThis.ɵngjsInjected["FooService"][0];');
-      expect(result).toContain('private logger = globalThis.ɵngjsInjected["FooService"][1];');
-      expect(result).toContain('this.label = globalThis.ɵngjsInjected["FooService"][2].id;');
+      // Fuera de un `ɵfac` (`new FooService()` en `runInInjectionContext`) queda el `inject()` original de respaldo.
+      expect(result).toContain('private http = (globalThis.ɵngjsInjected && globalThis.ɵngjsInjected["FooService"] ? globalThis.ɵngjsInjected["FooService"][0] : inject(HttpClient));');
+      expect(result).toContain('private logger = (globalThis.ɵngjsInjected && globalThis.ɵngjsInjected["FooService"] ? globalThis.ɵngjsInjected["FooService"][1] : di(Logger, { optional: true }));');
+      expect(result).toContain('this.label = (globalThis.ɵngjsInjected && globalThis.ɵngjsInjected["FooService"] ? globalThis.ɵngjsInjected["FooService"][2] : inject("$locale")).id;');
       expect(metadata.injectTokens).toEqual([
         { token: TokenName.of("HttpClient", "ngjs-core"), flags: {} },
         { token: own("Logger"), flags: { optional: true } },
@@ -246,7 +247,9 @@ describe("decoratorReaderTransform", () => {
       const result = await decoratorReaderTransform.transform(code, "foo.directive.ts");
       const [metadata] = MetadataStore.get("foo.directive.ts") as [ComponentMetadata];
 
-      expect(result).toContain('private element = globalThis.ɵngjsInjected["FooDirective"][0].nativeElement;');
+      expect(result).toContain(
+        'private element = (globalThis.ɵngjsInjected && globalThis.ɵngjsInjected["FooDirective"] ? globalThis.ɵngjsInjected["FooDirective"][0] : inject(ElementRef<HTMLElement>)).nativeElement;',
+      );
       expect(metadata.injectTokens).toEqual([{ token: TokenName.of("ElementRef", "ngjs-core"), flags: {} }]);
     });
 

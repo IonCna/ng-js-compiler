@@ -912,7 +912,9 @@ export class DecoratorReader {
           const specifier = context.imports.get(read.local)?.specifier;
           if (specifier) imports.add(specifier);
         }
-        edits.push({ ...call.span, replacement: InjectedValues.ref(key, injectTokens.length) });
+        // En una clase (no en un `useFactory`, que se copia a otro archivo) el `inject()` original queda de respaldo.
+        const fallback = key === InjectedValues.FACTORY ? undefined : DecoratorReader.source(call, context);
+        edits.push({ ...call.span, replacement: InjectedValues.ref(key, injectTokens.length, fallback) });
         injectTokens.push({ token: read.token, flags: read.flags });
         return;
       }
