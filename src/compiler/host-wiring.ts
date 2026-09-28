@@ -34,7 +34,25 @@ export class HostWiring {
     const handlerNames = metadata.hostListeners.map((_, index) => `ɵhandler${index}`);
     const cleanup = HostWiring.destroyStatement(unwatchNames, metadata.hostListeners, handlerNames);
 
-    return [...watches, ...listeners, cleanup];
+    return [...watches, ...HostWiring.initialApplyStatements(metadata, owner), ...listeners, cleanup];
+  }
+
+  /**
+   * Además del `$watch` (primer valor en el próximo digest), los bindings se aplican una vez al terminar `$onInit`
+   * (inputs asignados y `ngOnInit` corrido), como el primer CD de Angular: así ya están en el DOM cuando corre el
+   * `ngAfterViewInit` del padre (`$postLink`, después del de los hijos) — `NgbScrollSpy` busca `#id` de sus fragmentos.
+   */
+  private static initialApplyStatements(metadata: BindingsMetadata, owner: string): string[] {
+    if (!metadata.hostBindings.length) return [];
+    const applies = metadata.hostBindings.map((binding) => {
+      const parsed = HostWiring.parseHostProperty(binding.hostProperty, owner, binding.propName);
+      const apply = parsed.kind === "classMap" ? HostWiring.classMapExpr("v", "undefined") : `${HostWiring.applyExpr(parsed, "v")};`;
+      return `(function (v) { ${apply} })(instance.${binding.propName});`;
+    });
+    return [
+      "var ɵhostOnInit = instance.$onInit;",
+      `instance.$onInit = function () { var ɵresult = ɵhostOnInit ? ɵhostOnInit.apply(this, arguments) : undefined; ${applies.join(" ")} return ɵresult; };`,
+    ];
   }
 
   private static watchStatement(binding: HostBinding, index: number, owner: string): string {

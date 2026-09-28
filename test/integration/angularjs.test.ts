@@ -1140,6 +1140,43 @@ export class AppModule {}
     expect(controller.clicks).toBe(1);
   });
 
+  it("@HostBinding de un hijo ya aplicado cuando corre el ngAfterViewInit del padre (después de $onInit, sin esperar al digest)", async () => {
+    await write(
+      "spy.directive.ts",
+      `import { AfterViewInit, Directive, HostBinding, Input } from "ngjs-core";
+
+@Directive({ selector: "[appFrag]" })
+export class FragDirective {
+  @Input({ alias: "appFrag", binding: "@" }) id!: string;
+  @HostBinding("attr.id") get hostId(): string { return this.id; }
+  @HostBinding("class.frag") readonly frag = true;
+}
+
+@Directive({ selector: "[appSpy]" })
+export class SpyDirective implements AfterViewInit {
+  seen: string[] = [];
+  ngAfterViewInit(): void {
+    this.seen = Array.from(document.querySelectorAll(".frag"), (node) => node.id);
+  }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { FragDirective, SpyDirective } from "./spy.directive";
+
+@NgModule({ declarations: [FragDirective, SpyDirective], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular } = await bootstrap(`<div app-spy><p app-frag="one"></p><p app-frag="two"></p></div>`);
+    const spy = angular.element(dom.window.document.querySelector("[app-spy]")!).controller("appSpy") as { seen: string[] };
+    expect(spy.seen).toEqual(["one", "two"]);
+  });
+
   it('@HostBinding("class"): suma string/array/objeto sin pisar las clases estáticas y saca las del valor anterior', async () => {
     await write(
       "badge.component.ts",
