@@ -168,9 +168,9 @@ export class CardComponent {
     await write(
       modulePath,
       `import { NgModule } from "ngjs-core";
-import { PanelComponent, PlainComponent } from "./panel.component.ts";
+import { PanelComponent, PlainComponent, ShellComponent } from "./panel.component.ts";
 
-@NgModule({ declarations: [PanelComponent, PlainComponent] })
+@NgModule({ declarations: [PanelComponent, PlainComponent, ShellComponent] })
 export class AppModule {}
 `,
     );
@@ -183,6 +183,9 @@ export class PanelComponent {}
 
 @Component({ selector: "app-plain", template: "<p>ng-content no es un tag acá</p>" })
 export class PlainComponent {}
+
+@Component({ selector: "app-shell", templateUrl: "/templates/shell.html", ɵngContent: true })
+export class ShellComponent {}
 `,
     );
     const scanner = new ApplicationScanner();
@@ -192,6 +195,8 @@ export class PlainComponent {}
 
     expect(output).toContain('.component("appPanel", { controller: PanelComponent.ɵfac, template: "<section><ng-content></ng-content></section>", controllerAs: "$ctrl", transclude: true })');
     expect(output).toContain('.component("appPlain", { controller: PlainComponent.ɵfac, template: "<p>ng-content no es un tag acá</p>", controllerAs: "$ctrl" })');
+    // Con `templateUrl`, la marca que deja `TemplateFiles` de ng-js-vite (`ɵngContent`) en lugar del template.
+    expect(output).toContain('.component("appShell", { controller: ShellComponent.ɵfac, templateUrl: "/templates/shell.html", controllerAs: "$ctrl", transclude: true })');
   });
 
   it("un @Component con @ContentChild y sin <ng-content> también transcluye (sus content queries ven el contenido)", async () => {

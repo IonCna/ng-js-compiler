@@ -65,8 +65,10 @@ export class ComponentDefinition {
    * template. Una `@Directive` sin template no: su contenido es el light DOM.
    */
   static transcludes(metadata: { options: unknown; queries?: { kind: string }[] }): boolean {
-    const options = metadata.options as { template?: string; templateUrl?: string };
+    const options = metadata.options as { template?: string; templateUrl?: string; ɵngContent?: boolean };
     if (ComponentDefinition.projectsContent(options.template)) return true;
+    // Con `templateUrl` el template no se ve acá: `TemplateFiles` (ng-js-vite) marca `ɵngContent` si tiene `<ng-content>`.
+    if (options.ɵngContent === true) return true;
     const hasTemplate = options.template !== undefined || options.templateUrl !== undefined;
     return hasTemplate && (metadata.queries ?? []).some((query) => query.kind === "content");
   }
