@@ -21,7 +21,8 @@
  *   indirectamente, sin bajar el resto de la sintaxis (como Angular CLI con Zone.js).
  *
  * `NgZone.runOutsideAngular` (de `ngjs-core`) marca `globalThis.ɵngjsOutsideAngular` mientras corre: lo programado ahí
- * no dispara digest (se decide al programar, como la zona de Angular).
+ * no dispara digest (se decide al programar, como la zona de Angular) y, al correr, sigue afuera: lo que ESE callback
+ * programe tampoco dispara digest (en Zone.js una tarea corre en la zona donde se programó).
  *
  * Fuera de alcance a propósito (no es Zone.js completo): fetch/XHR nativos, MutationObserver,
  * requestAnimationFrame, WebSocket.
@@ -45,12 +46,29 @@ export class ZonePatchesRuntime {
     return !(globalThis.ɵngjsOutsideAngular > 0);
   }
 
+  // Corre un callback en la zona donde se programó: adentro, digest al terminar; afuera, con el contador arriba —
+  // lo que el callback programe también queda afuera (en Zone.js una tarea corre en su zona). Sin esto, un \`.then\`
+  // programado afuera (el \`update()\` de popper) que toca el DOM agendaba trabajo "adentro" y volvía a disparar digest.
+  function ɵrunIn(inside, fn, self, args) {
+    if (inside) {
+      var result = fn.apply(self, args);
+      ɵsafeApply();
+      return result;
+    }
+    globalThis.ɵngjsOutsideAngular = (globalThis.ɵngjsOutsideAngular || 0) + 1;
+    try {
+      return fn.apply(self, args);
+    } finally {
+      globalThis.ɵngjsOutsideAngular--;
+    }
+  }
+
   var ɵsetTimeout = window.setTimeout;
   window.setTimeout = function (fn, delay) {
     if (typeof fn !== "function") return ɵsetTimeout.apply(window, arguments);
     var extra = Array.prototype.slice.call(arguments, 2);
     var inside = ɵinside();
-    return ɵsetTimeout.call(window, function () { fn.apply(null, extra); if (inside) ɵsafeApply(); }, delay);
+    return ɵsetTimeout.call(window, function () { ɵrunIn(inside, fn, null, extra); }, delay);
   };
 
   var ɵsetInterval = window.setInterval;
@@ -58,14 +76,23 @@ export class ZonePatchesRuntime {
     if (typeof fn !== "function") return ɵsetInterval.apply(window, arguments);
     var extra = Array.prototype.slice.call(arguments, 2);
     var inside = ɵinside();
-    return ɵsetInterval.call(window, function () { fn.apply(null, extra); if (inside) ɵsafeApply(); }, delay);
+    return ɵsetInterval.call(window, function () { ɵrunIn(inside, fn, null, extra); }, delay);
   };
+
+  // Los \`resolve\`/\`reject\` nativos de una promesa (sin nombre, sin \`prototype\`): los pasa el motor cuando una promesa
+  // se resuelve con otra (el "thenable job"), desde su propio microtask. No es trabajo de la app — los \`.then\` de la
+  // app sobre la promesa de afuera ya disparan su digest — y contarlo "adentro" encadenaba digests sin fin.
+  var ɵfnToString = Function.prototype.toString;
+  function ɵisResolver(fn) {
+    return typeof fn === "function" && fn.name === "" && !("prototype" in fn) && ɵfnToString.call(fn).indexOf("[native code]") !== -1;
+  }
 
   var ɵthen = Promise.prototype.then;
   Promise.prototype.then = function (onFulfilled, onRejected) {
+    if (ɵisResolver(onFulfilled) && ɵisResolver(onRejected)) return ɵthen.call(this, onFulfilled, onRejected);
     var inside = ɵinside();
     var wrap = function (fn) {
-      return typeof fn === "function" ? function (value) { var result = fn(value); if (inside) ɵsafeApply(); return result; } : fn;
+      return typeof fn === "function" ? function (value) { return ɵrunIn(inside, fn, undefined, [value]); } : fn;
     };
     return ɵthen.call(this, wrap(onFulfilled), wrap(onRejected));
   };
@@ -92,7 +119,7 @@ export class ZonePatchesRuntime {
     // Como el nativo: el mismo listener dos veces en el mismo target/tipo/fase se registra una sola vez.
     if (ɵfindWrapper(entries, this, type, capture) !== -1) return;
     var inside = ɵinside();
-    var wrapped = function (event) { var result = listener.call(this, event); if (inside) ɵsafeApply(); return result; };
+    var wrapped = function (event) { return ɵrunIn(inside, listener, this, [event]); };
     if (!entries) { entries = []; ɵwrappers.set(listener, entries); }
     entries.push({ target: this, type: type, capture: capture, wrapped: wrapped });
     return ɵaddEventListener.call(this, type, wrapped, options);

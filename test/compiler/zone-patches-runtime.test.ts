@@ -221,6 +221,41 @@ describe("ZonePatchesRuntime", () => {
     expect(scope.calls).toBe(1);
   });
 
+  it("un callback programado afuera corre afuera: lo que él programe (un .then, un timer) tampoco dispara $apply", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    const globals = win as unknown as { ɵngjsRootScope: unknown; ɵngjsOutsideAngular: number };
+    globals.ɵngjsRootScope = scope;
+
+    let seenOutside = -1;
+    globals.ɵngjsOutsideAngular = 1;
+    const chained = new Promise<void>((resolve) =>
+      win.setTimeout(() => {
+        seenOutside = globals.ɵngjsOutsideAngular;
+        win.Promise.resolve().then(() => win.setTimeout(resolve, 0));
+      }, 0),
+    );
+    globals.ɵngjsOutsideAngular = 0;
+
+    await chained;
+    expect(seenOutside).toBe(1);
+    expect(globals.ɵngjsOutsideAngular).toBe(0);
+    expect(scope.calls).toBe(0);
+  });
+
+  it("una promesa resuelta con otra promesa no dispara $apply por el encadenado interno del motor (solo por los .then de la app)", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    const inner = win.Promise.resolve(1);
+    await new win.Promise((resolve) => resolve(inner));
+    expect(scope.calls).toBe(0);
+
+    await win.Promise.resolve().then(() => undefined);
+    expect(scope.calls).toBe(1);
+  });
+
   it("con la app destruida ($rootScope.$root === null) un timer pendiente no explota", async () => {
     const win = evaluate();
     (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = { $root: null, $apply: () => { throw new Error("no"); } };
