@@ -77,6 +77,11 @@ export class ApplicationScanner {
     return (path && this.nodes.get(ApplicationScanner.key(className, path, true))) || this.nodes.get(className);
   }
 
+  /** Todos los nodos del proyecto, en el orden en que se escanearon. */
+  allNodes(): IterableIterator<ApplicationNode> {
+    return this.nodes.values();
+  }
+
   private static key(className: string, path: string, local: boolean | undefined): string {
     return local ? `${resolve(path)}#${className}` : className;
   }
@@ -208,7 +213,7 @@ export class ApplicationScanner {
     }
   }
 
-  private static async listTsFiles(dir: string): Promise<string[]> {
+  static async listTsFiles(dir: string): Promise<string[]> {
     const entries = await readdir(dir, { withFileTypes: true });
     const files: string[] = [];
 

@@ -1,7 +1,7 @@
 import type { ApplicationNode } from "@/compiler/application-node.ts";
 import type { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
-import { ComponentBindings } from "@/compiler/component-bindings.ts";
+import { type BindingDef, ComponentBindings } from "@/compiler/component-bindings.ts";
 import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HashId } from "@/compiler/hash-id.ts";
@@ -253,15 +253,42 @@ export class ModuleWriter {
     // es solo `E` y la directiva, solo `A`.
     const elements = ModuleWriter.uniqueByName(alternatives.filter((parsed) => parsed.restrict === "E"));
     const attributes = ModuleWriter.uniqueByName(alternatives.filter((parsed) => parsed.restrict !== "E"));
-    return [...elements, ...attributes].map((parsed) => {
-      if (parsed.restrict === "E") return `.component(${JSON.stringify(parsed.registrationName)}, { ${fields(definition).join(", ")} })`;
-      // Selector de atributo (`[ngbAccordionBody]`): `.component()` solo sabe de elementos, así que va como la directiva
-      // que `.component()` arma por dentro — scope aislado (su `controllerAs` no pisa el del padre) y los `bindings`
-      // como `bindToController`.
-      const { bindings = {}, ...rest } = definition as { bindings?: Record<string, string> };
-      const directive = [...fields(rest), `restrict: ${JSON.stringify(parsed.restrict)}`, "scope: {}", `bindToController: ${JSON.stringify(bindings)}`];
-      return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${directive.join(", ")} }; })`;
-    });
+    return [...elements, ...attributes].flatMap((parsed) => [
+      ModuleWriter.componentRegistration(parsed, definition, fields),
+      ...ModuleWriter.outputAttributesCall(parsed, metadata.outputs),
+    ]);
+  }
+
+  private static componentRegistration(
+    parsed: ParsedSelector,
+    definition: Record<string, unknown>,
+    fields: (entries: Record<string, unknown>) => string[],
+  ): string {
+    if (parsed.restrict === "E") return `.component(${JSON.stringify(parsed.registrationName)}, { ${fields(definition).join(", ")} })`;
+    // Selector de atributo (`[ngbAccordionBody]`): `.component()` solo sabe de elementos, así que va como la directiva
+    // que `.component()` arma por dentro — scope aislado (su `controllerAs` no pisa el del padre) y los `bindings`
+    // como `bindToController`.
+    const { bindings = {}, ...rest } = definition as { bindings?: Record<string, string> };
+    const directive = [...fields(rest), `restrict: ${JSON.stringify(parsed.restrict)}`, "scope: {}", `bindToController: ${JSON.stringify(bindings)}`];
+    return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${directive.join(", ")} }; })`;
+  }
+
+  /**
+   * En Angular un output (`(hidden)="…"`) nunca llega al DOM; en AngularJS el binding `&` es un atributo real, y si se
+   * llama como uno nativo (`hidden`, `title`, `open`) el browser lo aplica (`hidden` oculta el elemento). Una directiva
+   * más con el mismo nombre los saca en el pre-link: AngularJS ya leyó los bindings `&` del `attrs` de compilación,
+   * y el template compilado (que se clona en `ng-if`/`ng-repeat`) los conserva.
+   */
+  private static outputAttributesCall(parsed: ParsedSelector, outputs: BindingDef[]): string[] {
+    if (outputs.length === 0) return [];
+    const names = [...new Set(outputs.map((output) => output.bindingName.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`)))];
+    const tagCheck = parsed.requiredTag
+      ? `if (element[0].localName !== ${JSON.stringify(parsed.requiredTag.toLowerCase())}) return; `
+      : "";
+    const pre = `function (scope, element) { ${tagCheck}${JSON.stringify(names)}.forEach(function (name) { element[0].removeAttribute(name); }); }`;
+    return [
+      `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { restrict: ${JSON.stringify(parsed.restrict)}, link: { pre: ${pre} } }; })`,
+    ];
   }
 
   /** El `controllerAs` del módulo solo aplica a una directiva CON template (su vista lo usa); si no, su nombre. */
@@ -275,7 +302,7 @@ export class ModuleWriter {
     const alternatives = ModuleWriter.uniqueByName(SelectorParser.parse(options.selector));
     const bindings = ComponentBindings.from(metadata.inputs, metadata.outputs);
 
-    return alternatives.map((parsed) => {
+    return alternatives.flatMap((parsed) => {
       const fields = [
         `controller: ${node.className}.ɵfac`,
         `restrict: ${JSON.stringify(parsed.restrict)}`,
@@ -286,7 +313,10 @@ export class ModuleWriter {
       if (options.templateUrl !== undefined) fields.push(`templateUrl: ${JSON.stringify(options.templateUrl)}`);
       if (ComponentDefinition.transcludes(metadata)) fields.push("transclude: true");
 
-      return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${fields.join(", ")} }; })`;
+      return [
+        `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${fields.join(", ")} }; })`,
+        ...ModuleWriter.outputAttributesCall(parsed, metadata.outputs),
+      ];
     });
   }
 

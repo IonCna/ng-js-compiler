@@ -18,12 +18,15 @@ import type { Plugin } from "esbuild";
  * absoluta de `with` (environments) — se resuelve ANTES de leer, así el
  * archivo reemplazado también pasa por la cadena de transforms como
  * cualquier otro.
+ *
+ * `onScanned`: recibe el escaneo de cada build (ej. `ngjs build` de una librería arma su `LibraryManifest`).
  */
 export function pluginLoader(
   sourceRoot: string | string[],
   extraTransforms: NgjsTransform[] = [],
   fileReplacements: Record<string, string> = {},
   projectType: ProjectType = "application",
+  onScanned?: (scanner: ApplicationScanner) => void,
 ): Plugin {
   return {
     name: "ngjs-plugin-loader",
@@ -52,6 +55,7 @@ export function pluginLoader(
           const scanner = new ApplicationScanner();
           await scanner.scan(sourceRoot, { transforms: extraTransforms, fileReplacements });
           transforms = [...extraTransforms, ...createNgjsCompilerTransforms(scanner)];
+          onScanned?.(scanner);
         } catch (error) {
           scanFailed = true;
           return { errors: [{ text: error instanceof Error ? error.message : String(error) }] };

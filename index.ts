@@ -20,3 +20,4 @@ export { createModuleWriterTransform, ModuleWriter } from "@/compiler/module-wri
 export { createNgjsCompilerTransforms } from "@/compiler/ngjs-compiler-transforms.ts";
 export type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 export { SelectorParser, type ParsedSelector } from "@/compiler/selector-parser.ts";
+export { LibraryManifest, type ManifestDeclaration, type NgjsManifest } from "@/compiler/library-manifest.ts";

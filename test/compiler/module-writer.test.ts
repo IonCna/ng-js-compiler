@@ -163,6 +163,46 @@ export class CardComponent {
     expect(output).toContain('bindings: {"count":"<?","closed":"&?"}');
   });
 
+  it("los atributos de los outputs se sacan del DOM en el pre-link (como Angular, un output no es un atributo)", async () => {
+    const modulePath = join(dir, "app.module.ts");
+    await write(
+      modulePath,
+      `import { NgModule } from "ngjs-core";
+import { ToastComponent, TipDirective } from "./toast.component.ts";
+
+@NgModule({ declarations: [ToastComponent, TipDirective], imports: [] })
+export class AppModule {}
+`,
+    );
+    await write(
+      join(dir, "toast.component.ts"),
+      `import { Component, Directive, Input, Output } from "ngjs-core";
+
+@Component({ selector: "app-toast" })
+export class ToastComponent {
+  @Input() header;
+  @Output() hidden;
+  @Output("afterShown") shown;
+}
+
+@Directive({ selector: "[appTip]" })
+export class TipDirective {
+  @Input() appTip;
+}
+`,
+    );
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+    const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
+
+    expect(output).toContain(
+      '.directive("appToast", function () { return { restrict: "E", link: { pre: function (scope, element) { ["hidden","after-shown"].forEach(function (name) { element[0].removeAttribute(name); }); } } }; })',
+    );
+    // Sin outputs no hay directiva extra.
+    expect(output.match(/\.directive\("appTip"/g)).toHaveLength(1);
+  });
+
   it("un template con <ng-content> se registra con transclude: true (sin eso el contenido proyectado se pierde)", async () => {
     const modulePath = join(dir, "app.module.ts");
     await write(

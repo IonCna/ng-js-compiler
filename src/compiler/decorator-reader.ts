@@ -144,6 +144,19 @@ export class DecoratorReader {
   };
 
   static async read(code: string, path: string): Promise<string | undefined> {
+    const parsed = await DecoratorReader.parseFile(code, path);
+    if (!parsed) return undefined;
+
+    MetadataStore.set(path, parsed.metadata);
+    return DecoratorReader.stripSpans(code, parsed.stripSpans);
+  }
+
+  /** La metadata de las clases decoradas de un archivo, sin guardarla en `MetadataStore` (ver `LibraryManifest.fromSources`). */
+  static async metadataOf(code: string, path: string): Promise<DecoratorMetadata[]> {
+    return (await DecoratorReader.parseFile(code, path))?.metadata ?? [];
+  }
+
+  private static async parseFile(code: string, path: string): Promise<{ metadata: DecoratorMetadata[]; stripSpans: SourceEdit[] } | undefined> {
     if (!/@(Component|Directive|Pipe|Service|Injectable|NgModule|Input|Output|HostBinding|HostListener|ViewChild|ViewChildren|ContentChild|ContentChildren)\s*\(/.test(code)) {
       return undefined;
     }
@@ -161,9 +174,7 @@ export class DecoratorReader {
     }
 
     if (!metadata.length) return undefined;
-
-    MetadataStore.set(path, metadata);
-    return DecoratorReader.stripSpans(code, stripSpans);
+    return { metadata, stripSpans };
   }
 
   /**

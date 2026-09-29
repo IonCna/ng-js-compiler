@@ -4,6 +4,10 @@ import { MetadataStore } from "@/metadata/metadata-store.ts";
 type ClassMetadata = DecoratorMetadata;
 type ConstructorMetadata = Pick<ConstructionMetadata, "constructorTokens" | "constructorFlags" | "constructorAttributes">;
 type ElementBindings = Omit<BindingsMetadata, "providers">;
+/** Busca la base por nombre, como se ve desde `from` — por defecto en `MetadataStore`. */
+export type ClassLookup = (className: string, from: ClassMetadata) => ClassMetadata | undefined;
+
+const storeLookup: ClassLookup = (className, from) => MetadataStore.findClass(className, from);
 
 /**
  * Herencia entre clases decoradas del proyecto, resuelta en build — la versión de compilación de `collectMetadata`
@@ -21,10 +25,10 @@ type ElementBindings = Omit<BindingsMetadata, "providers">;
  */
 export class ClassHierarchy {
   /** `[raíz, ..., metadata]` — solo clases decoradas del proyecto. */
-  static chain(metadata: ClassMetadata): ClassMetadata[] {
+  static chain(metadata: ClassMetadata, lookup: ClassLookup = storeLookup): ClassMetadata[] {
     const chain = [metadata];
     for (let current = metadata; current.superClass; ) {
-      const parent = MetadataStore.findClass(current.superClass, current);
+      const parent = lookup(current.superClass, current);
       if (!parent || chain.includes(parent)) break;
       chain.unshift(parent);
       current = parent;
@@ -47,8 +51,8 @@ export class ClassHierarchy {
   }
 
   /** Bindings de un `@Component`/`@Directive` con los de sus ancestros elemento (padre → hijo; el hijo pisa). */
-  static bindingsOf(metadata: ClassMetadata & ElementBindings): ElementBindings {
-    const elements = ClassHierarchy.chain(metadata).filter(
+  static bindingsOf(metadata: ClassMetadata & ElementBindings, lookup: ClassLookup = storeLookup): ElementBindings {
+    const elements = ClassHierarchy.chain(metadata, lookup).filter(
       (member): member is ClassMetadata & ElementBindings => member.kind === "component" || member.kind === "directive",
     );
     const merge = <T>(pick: (member: ElementBindings) => T[], key: (item: T) => string): T[] => {
