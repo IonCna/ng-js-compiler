@@ -213,6 +213,12 @@ export interface NgModuleMetadata extends ConstructionMetadata {
   token: string;
   declarations: string[];
   imports: ModuleImport[];
+  /**
+   * `exports`: un módulo exportado entra a los `requires` de AngularJS como si se importara (quien importa este
+   * módulo recibe sus declaraciones, como en Angular). Las declaraciones exportadas no cambian nada: en AngularJS
+   * ya son globales.
+   */
+  exports?: ({ kind: "reference"; identifier: string } | { kind: "expression"; expr: string })[];
   providers: ProviderMetadata[];
   bootstrap: string[];
   controllerAs?: string;

@@ -177,6 +177,24 @@ export class ApplicationScanner {
     }
 
     for (const imported of metadata.imports) this.resolveImport(node, imported);
+    for (const exported of metadata.exports ?? []) this.resolveExport(node, exported);
+  }
+
+  /**
+   * Un `@NgModule` del proyecto exportado entra como un import más (si no estaba); una declaración propia no cambia
+   * nada. Lo que no es del proyecto se decide al correr (`ApplicationNode.externalExports`).
+   */
+  private resolveExport(node: ApplicationNode, exported: NonNullable<NgModuleMetadata["exports"]>[number]): void {
+    if (exported.kind === "expression") {
+      node.externalExports.push(exported.expr);
+      return;
+    }
+    const own = this.get(exported.identifier, node.path);
+    if (!own) {
+      node.externalExports.push(exported.identifier);
+      return;
+    }
+    if (own.metadata.kind === "ngmodule" && !node.imports.includes(own)) node.imports.push(own);
   }
 
   /**

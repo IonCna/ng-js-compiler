@@ -32,6 +32,7 @@ import type {
   InjectDep,
   InjectFlags,
   ModuleImport,
+  NgModuleMetadata,
   ProviderMetadata,
   QueryMetadata,
 } from "@/metadata/decorator-metadata.ts";
@@ -42,6 +43,9 @@ type ImportMap = Map<string, { symbol: string; packageName: string | undefined; 
 
 /** Un span a sacar del código, o a reemplazar por `replacement` (`inject()` → `InjectedValues.ref`). */
 type SourceEdit = Span & { replacement?: string };
+
+/** Un elemento de `exports` de `@NgModule` (ver `NgModuleMetadata.exports`). */
+type ModuleExport = NonNullable<NgModuleMetadata["exports"]>[number];
 
 /** Inputs/outputs/host de la clase — los `providers` se leen aparte, del objeto del decorador. */
 type ClassBindings = Omit<BindingsMetadata, "providers" | "hostDirectives">;
@@ -295,6 +299,7 @@ export class DecoratorReader {
           token: DecoratorReader.diName(className, context),
           declarations: DecoratorReader.identifierArray(objExpr, "declarations"),
           imports: DecoratorReader.readModuleImports(objExpr, className, context),
+          exports: DecoratorReader.readModuleExports(objExpr, className, context),
           providers: DecoratorReader.readProviders(objExpr, className, context),
           bootstrap: DecoratorReader.identifierArray(objExpr, "bootstrap"),
           controllerAs: DecoratorReader.stringProp(objExpr, "controllerAs"),
@@ -311,7 +316,11 @@ export class DecoratorReader {
           ...construction,
           ...DecoratorReader.withOptionBindings(DecoratorReader.readBindings(cls.body, stripSpans, className, context), objExpr, className, context),
           hostDirectives: DecoratorReader.readHostDirectives(objExpr, className, context),
-          providers: DecoratorReader.readProviders(objExpr, className, context),
+          // `viewProviders` van al mismo injector del elemento: en Angular no los ve el contenido proyectado; acá sí.
+          providers: [
+            ...DecoratorReader.readProviders(objExpr, className, context),
+            ...DecoratorReader.readProviders(objExpr, className, context, "viewProviders"),
+          ],
         };
       }
 
@@ -453,6 +462,30 @@ export class DecoratorReader {
     });
   }
 
+  /**
+   * `exports: [...]` de `@NgModule` — identificadores (propios o importados) o accesos a miembro; anidados se aplanan.
+   * Qué es cada uno (módulo o declaración) lo decide el scanner.
+   */
+  private static readModuleExports(objExpr: ObjectExpression | undefined, owner: string, context: FileContext): ModuleExport[] {
+    const value = DecoratorReader.propValue(objExpr, "exports");
+    if (!value) return [];
+    if (value.type !== "ArrayExpression") {
+      throw new Error(`DecoratorReader: "${owner}" — \`exports\` tiene que ser un array literal.`);
+    }
+    const read = (array: ArrayExpression): ModuleExport[] =>
+      array.elements.flatMap((element): ModuleExport[] => {
+        if (!element || element.spread) throw new Error(`DecoratorReader: "${owner}" — \`exports\` no admite huecos ni \`...spread\`.`);
+        const { expression } = element;
+        if (expression.type === "ArrayExpression") return read(expression);
+        if (expression.type === "Identifier") return [{ kind: "reference", identifier: expression.value }];
+        if (expression.type === "MemberExpression") return [{ kind: "expression", expr: DecoratorReader.source(expression, context) }];
+        throw new Error(
+          `DecoratorReader: "${owner}" — export \`${DecoratorReader.source(expression, context)}\` no soportado (un @NgModule o una declaración).`,
+        );
+      });
+    return read(value);
+  }
+
   /** `angular.module("x")` — la única llamada que da un `IModule` sin ambigüedad. */
   private static isAngularModuleCall(expr: Expression): boolean {
     if (expr.type !== "CallExpression" || expr.callee.type !== "MemberExpression") return false;
@@ -465,11 +498,16 @@ export class DecoratorReader {
    * (`UserService`) o un objeto literal (`{ provide, useClass/useValue/useFactory/useExisting, deps, multi }`).
    * Lo que no se puede leer en build (variable, `...spread`, `provideX()`) es error, nunca se descarta.
    */
-  private static readProviders(objExpr: ObjectExpression | undefined, owner: string, context: FileContext): ProviderMetadata[] {
-    const value = DecoratorReader.propValue(objExpr, "providers");
+  private static readProviders(
+    objExpr: ObjectExpression | undefined,
+    owner: string,
+    context: FileContext,
+    key: "providers" | "viewProviders" = "providers",
+  ): ProviderMetadata[] {
+    const value = DecoratorReader.propValue(objExpr, key);
     if (!value) return [];
     if (value.type !== "ArrayExpression") {
-      throw new Error(`DecoratorReader: "${owner}" — \`providers\` tiene que ser un array literal.`);
+      throw new Error(`DecoratorReader: "${owner}" — \`${key}\` tiene que ser un array literal.`);
     }
     return DecoratorReader.providerElements(value, owner, context);
   }

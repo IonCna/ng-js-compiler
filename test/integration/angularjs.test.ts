@@ -1029,6 +1029,41 @@ export class AppModule {}
     });
   });
 
+  it("exports de @NgModule: un módulo exportado (sin importarlo) llega a quien importa; viewProviders se inyectan", async () => {
+    await write(
+      "widgets.ts",
+      `import { Component, Injectable, NgModule } from "ngjs-core";
+
+@Injectable()
+export class Palette { color = "rojo"; }
+
+@Component({ selector: "app-swatch", template: "<b>{{ $ctrl.palette.color }}</b>", viewProviders: [Palette] })
+export class SwatchComponent { constructor(readonly palette: Palette) {} }
+
+@NgModule({ declarations: [SwatchComponent] })
+export class WidgetsModule {}
+
+// Exporta WidgetsModule sin importarlo, y su propia declaración: como un SharedModule de Angular.
+@NgModule({ exports: [WidgetsModule] })
+export class SharedModule {}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { SharedModule } from "./widgets";
+
+@NgModule({ imports: [SharedModule] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, injector } = await bootstrap("<app-swatch></app-swatch>");
+    (injector.get("$rootScope") as { $digest(): void }).$digest();
+    expect(dom.window.document.querySelector("app-swatch")!.textContent).toBe("rojo");
+  });
+
   it("selectores de Angular: .clase, [atributo=valor] y :not() — solo se aplican donde el selector entero coincide", async () => {
     await write(
       "directives.ts",

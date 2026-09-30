@@ -28,6 +28,11 @@ export class ApplicationNode {
   /** Llamadas de `imports` (`ConfigModule.forRoot(options)`), texto fuente — se evalúan al correr, ver `ModuleWithProvidersRuntime`. */
   callImports: string[] = [];
   /**
+   * `exports` que no son del proyecto (texto fuente): entran a los `requires` solo si al correr resultan ser un
+   * `@NgModule` compilado (`ɵmod`) — una clase exportada de otro paquete puede ser un componente.
+   */
+  externalExports: string[] = [];
+  /**
    * Solo `@NgModule`: el `controllerAs` por defecto de sus componentes (y directivas con template) — el propio, o el
    * del módulo que lo importa si no declara uno (ver `ApplicationScanner.inheritControllerAs`).
    */

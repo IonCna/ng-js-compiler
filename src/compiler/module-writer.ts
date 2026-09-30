@@ -114,6 +114,10 @@ export class ModuleWriter {
       ...node.imports.map((imported) => `${imported.className}.ɵmod.id`),
       ...node.legacyImports,
       ...calls.map((call) => `ɵimportedModuleName(${call.name})`),
+      // `exports` de otro paquete: solo si es un `@NgModule` compilado (una clase exportada puede ser un componente).
+      ...(node.externalExports.length
+        ? [`...[${node.externalExports.map((expr) => `${expr} && ${expr}.ɵmod ? ${expr}.ɵmod.id : null`).join(", ")}].filter(Boolean)`]
+        : []),
     ];
 
     const chainCalls = [
