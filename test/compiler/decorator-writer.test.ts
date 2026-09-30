@@ -42,7 +42,7 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class CardComponent { constructor(u, h) { this.u = u; this.h = h; } }", "card.ts")!;
 
     expect(output).toContain(
-      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "$http", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new CardComponent(a0, a1); return instance; }];',
+      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "$http", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new ((this && this.ɵT) || CardComponent)(a0, a1); return instance; }];',
     );
     const fac = evaluate(output, "CardComponent").ɵfac as [
       string,
@@ -61,7 +61,7 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class CardComponent { constructor(u, l) { this.u = u; this.l = l; } }", "card.ts")!;
 
     expect(output).toContain(
-      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "ɵresolve", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new CardComponent(a0, a1("Logger_1a2b3c4d", {"optional":true,"self":true}, true)); return instance; }];',
+      'CardComponent.ɵfac = ["UserService_1a2b3c4d", "ɵresolve", "$element", "$scope", function CardComponent_Factory(a0, a1, $element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new ((this && this.ɵT) || CardComponent)(a0, a1("Logger_1a2b3c4d", {"optional":true,"self":true}, true)); return instance; }];',
     );
     const fac = evaluate(output, "CardComponent").ɵfac as unknown[];
     const factory = fac[4] as (u: unknown, optional: (token: string) => unknown, element: unknown, scope: unknown) => { u: unknown; l: unknown };
@@ -92,7 +92,7 @@ describe("DecoratorWriter", () => {
     )!;
 
     expect(output).toContain(
-      'FooService.ɵfac = ["UserService_1a2b3c4d", "Http_1a2b3c4d", "ɵresolve", function FooService_Factory(a0, i0, i1) { var ɵprevious = globalThis.ɵngjsInjected; globalThis.ɵngjsInjected = { "FooService": [i0, i1("Logger_1a2b3c4d", {"optional":true})] }; try { var instance = new FooService(a0); } finally { globalThis.ɵngjsInjected = ɵprevious; } return instance; }];',
+      'FooService.ɵfac = ["UserService_1a2b3c4d", "Http_1a2b3c4d", "ɵresolve", function FooService_Factory(a0, i0, i1) { var ɵprevious = globalThis.ɵngjsInjected; globalThis.ɵngjsInjected = Object.assign({}, ɵprevious, { "FooService": [i0, i1("Logger_1a2b3c4d", {"optional":true})] }); try { var instance = new ((this && this.ɵT) || FooService)(a0); } finally { globalThis.ɵngjsInjected = ɵprevious; } return instance; }];',
     );
     const FooService = evaluate(output, "FooService") as unknown as { ɵfac: unknown[] };
     const factory = FooService.ɵfac[3] as (u: unknown, http: unknown, optional: (token: string) => unknown) => Record<string, unknown>;
@@ -141,7 +141,7 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class CardComponent {}", "card.ts")!;
 
     expect(output).toContain(
-      'CardComponent.ɵfac = ["$element", "$scope", function CardComponent_Factory($element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new CardComponent(); return instance; }];',
+      'CardComponent.ɵfac = ["$element", "$scope", function CardComponent_Factory($element, $scope) { $element.data("$ngjsHost", $element[0]); var instance = new ((this && this.ɵT) || CardComponent)(); return instance; }];',
     );
   });
 
@@ -152,7 +152,7 @@ describe("DecoratorWriter", () => {
 
     const output = DecoratorWriter.write("class UpperPipe {}", "pipes.ts")!;
 
-    expect(output).toContain("UpperPipe.ɵfac = [function UpperPipe_Factory() { return new UpperPipe(); }];");
+    expect(output).toContain("UpperPipe.ɵfac = [function UpperPipe_Factory() { return new ((this && this.ɵT) || UpperPipe)(); }];");
     expect(output).not.toContain("$element");
   });
 
@@ -219,7 +219,7 @@ describe("DecoratorWriter", () => {
     const output = DecoratorWriter.write("class ButtonLabel {}", "button-label.ts")!;
 
     expect(output).toContain(
-      'if (["button"].indexOf(ɵtag) === -1) { console.warn("ButtonLabel: este selector requiere <button>, no se aplica en <" + ɵtag + ">."); return {}; }',
+      'if (!(this && this.ɵT) && ["button"].indexOf(ɵtag) === -1) { console.warn("ButtonLabel: este selector requiere <button>, no se aplica en <" + ɵtag + ">."); return {}; }',
     );
 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -273,7 +273,7 @@ describe("DecoratorWriter", () => {
 
     const output = DecoratorWriter.write("class ButtonLabel {}", "button-label.ts")!;
 
-    expect(output).toContain('if (["button","label"].indexOf(ɵtag) === -1)');
+    expect(output).toContain('if (!(this && this.ɵT) && ["button","label"].indexOf(ɵtag) === -1)');
 
     const ButtonLabel = evaluate(output, "ButtonLabel") as unknown as new () => object;
     const fac = (ButtonLabel as unknown as { ɵfac: unknown }).ɵfac as [
@@ -342,7 +342,7 @@ describe("DecoratorWriter", () => {
     const queue = new Function(`const globalThis = {}; ${output}; return globalThis.ɵngjsRootProviders;`)() as [string, unknown[]][];
 
     expect(queue.map(([token]) => token)).toEqual(["RootService_1a2b3c4d"]);
-    expect(queue[0]![1]).toEqual(["function RootService_Factory() { return new RootService(); }"].map(() => expect.any(Function)));
+    expect(queue[0]![1]).toEqual(["function RootService_Factory() { return new ((this && this.ɵT) || RootService)(); }"].map(() => expect.any(Function)));
   });
 
   it("ɵpipe con name y pure (true por default, como Angular)", () => {
@@ -438,7 +438,7 @@ describe("DecoratorWriter", () => {
 
     const output = DecoratorWriter.write("class AppModule { constructor(l) { this.l = l; } }", "app.module.ts")!;
 
-    expect(output).toContain('AppModule.ɵfac = ["Logger_1a2b3c4d", function AppModule_Factory(a0) { return new AppModule(a0); }];');
+    expect(output).toContain('AppModule.ɵfac = ["Logger_1a2b3c4d", function AppModule_Factory(a0) { return new ((this && this.ɵT) || AppModule)(a0); }];');
     expect(output).not.toContain("ɵprov");
     const fac = evaluate(output, "AppModule").ɵfac as [string, (logger: unknown) => { l: unknown }];
     expect(fac[1]("the-logger")).toMatchObject({ l: "the-logger" });

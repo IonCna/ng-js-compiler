@@ -1,7 +1,9 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ApplicationNode } from "@/compiler/application-node.ts";
+import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
 import { DecoratorReader } from "@/compiler/decorator-reader.ts";
+import { ElementInstances } from "@/compiler/element-instances.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import { TransformChain } from "@/compiler/transform-chain.ts";
@@ -116,6 +118,19 @@ export class ApplicationScanner {
             : [];
       if (providers.some(ApplicationScanner.providerUsesFlags)) return true;
       if (metadata.constructorFlags.some(ResolveDependency.hasFlags) || metadata.injectTokens.some((injected) => ResolveDependency.hasFlags(injected.flags))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Gate de todo el proyecto para `ElementInstances.lazyControllerSource`: alguna clase elemento inyecta una
+   * directiva/componente (constructor o `inject()`, también heredados). Corre dentro del scope del escaneo (`within`).
+   */
+  usesElementInstances(): boolean {
+    for (const { metadata } of this.nodes.values()) {
+      if (metadata.kind !== "component" && metadata.kind !== "directive") continue;
+      const tokens = [...ClassHierarchy.constructorOf(metadata).constructorTokens, ...ClassHierarchy.injectsByClass(metadata).flatMap(({ tokens: list }) => list.map(({ token }) => token))];
+      if (tokens.some((token) => ElementInstances.namesFor(token))) return true;
     }
     return false;
   }

@@ -851,6 +851,175 @@ export class AppModule {}
 
       await expect(bootstrap("")).rejects.toThrow(/"ChildService" hereda el factory de su clase padre — agregale @Injectable\(\)/);
     });
+
+    it("base de OTRO paquete (compilado aparte): la subclase sin constructor usa el ɵfac de la base — su DI, sus inject() y su host — más lo propio", async () => {
+      // La librería se compila sola (su propio escaneo) y se instala ya compilada en `node_modules`, como un paquete publicado.
+      const libDir = await mkdtemp(join(tmpdir(), "ngjs-integration-lib-"));
+      try {
+        await writeFile(join(libDir, "package.json"), JSON.stringify({ name: "ext-lib" }), "utf8");
+        await writeFile(
+          join(libDir, "index.ts"),
+          `import { Directive, HostBinding, Injectable, inject } from "ngjs-core";
+
+@Injectable()
+export class LibLogger { name = "lib-logger"; }
+
+@Injectable()
+export class LibConfig { name = "lib-config"; }
+
+@Directive()
+export abstract class LibBase {
+  @HostBinding("class.lib") readonly isLib = true;
+  readonly config = inject(LibConfig);
+  constructor(readonly logger: LibLogger) {}
+}
+`,
+          "utf8",
+        );
+        const lib = await build({
+          entryPoints: [join(libDir, "index.ts")],
+          bundle: true,
+          write: false,
+          format: "esm",
+          logLevel: "silent",
+          plugins: [pluginLoader(libDir), coreStub],
+        });
+        MetadataStore.clear();
+        await mkdir(join(dir, "node_modules", "ext-lib"), { recursive: true });
+        await write("node_modules/ext-lib/package.json", JSON.stringify({ name: "ext-lib", main: "index.js" }));
+        await write("node_modules/ext-lib/index.js", lib.outputFiles[0]!.text);
+      } finally {
+        await rm(libDir, { recursive: true, force: true });
+      }
+
+      await write(
+        "theme.ts",
+        `import { Injectable } from "ngjs-core";
+
+@Injectable()
+export class Theme { name = "theme"; }
+`,
+      );
+      await write(
+        "card.component.ts",
+        `import { Component, HostBinding, inject } from "ngjs-core";
+import { LibBase } from "ext-lib";
+import { Theme } from "./theme";
+
+@Component({ selector: "app-card", template: "<span>{{ $ctrl.logger.name }}</span>" })
+export class CardComponent extends LibBase {
+  @HostBinding("class.card") readonly isCard = true;
+  readonly theme = inject(Theme);
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { LibConfig, LibLogger } from "ext-lib";
+import { CardComponent } from "./card.component";
+import { Theme } from "./theme";
+
+@NgModule({ declarations: [CardComponent], imports: [], providers: [LibLogger, LibConfig, Theme] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      const { dom, angular } = await bootstrap("<app-card></app-card>");
+
+      const element = dom.window.document.querySelector("app-card")!;
+      const card = angular.element(element).controller("appCard") as { constructor: { name: string }; logger: { name: string }; config: { name: string }; theme: { name: string } };
+      expect(card.constructor.name).toBe("CardComponent");
+      expect(card.logger.name).toBe("lib-logger");
+      expect(card.config.name).toBe("lib-config");
+      expect(card.theme.name).toBe("theme");
+      expect(element.textContent).toBe("lib-logger");
+      expect(element.classList.contains("lib")).toBe(true);
+      expect(element.classList.contains("card")).toBe(true);
+    });
+  });
+
+  describe("inyectar una directiva del MISMO elemento que AngularJS construye después", () => {
+    it("se construye antes, bajo demanda (una sola instancia), por constructor y por inject()", async () => {
+      await write(
+        "directives.ts",
+        `import { Directive, inject } from "ngjs-core";
+
+@Directive({ selector: "[appZeta]" })
+export class ZetaDirective {
+  static built = 0;
+  readonly id = "zeta";
+  constructor() { ZetaDirective.built++; }
+}
+
+// "appAlpha" < "appZeta": AngularJS construye Alpha primero (misma prioridad, orden por nombre).
+@Directive({ selector: "[appAlpha]" })
+export class AlphaDirective {
+  readonly viaInject = inject(ZetaDirective);
+  readonly seen: string;
+  constructor(readonly zeta: ZetaDirective) { this.seen = zeta.id; }
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { AlphaDirective, ZetaDirective } from "./directives";
+
+@NgModule({ declarations: [AlphaDirective, ZetaDirective], imports: [], providers: [] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\nimport { ZetaDirective } from "./directives";\n(globalThis as any).Zeta = ZetaDirective;\n`);
+
+      const { dom, angular } = await bootstrap("<div app-alpha app-zeta></div>");
+
+      const element = angular.element(dom.window.document.querySelector("[app-alpha]")!);
+      const alpha = element.controller("appAlpha") as { zeta: unknown; viaInject: unknown; seen: string };
+      const zeta = element.controller("appZeta");
+      expect(alpha.seen).toBe("zeta");
+      expect(alpha.zeta).toBe(zeta);
+      expect(alpha.viaInject).toBe(zeta);
+      expect((dom.window as unknown as { Zeta: { built: number } }).Zeta.built).toBe(1);
+    });
+
+    it("dos directivas del mismo elemento que se piden entre sí: error de dependencia circular (NG0200)", async () => {
+      await write(
+        "directives.ts",
+        `import { Directive, forwardRef, Inject } from "ngjs-core";
+
+@Directive({ selector: "[appAlpha]" })
+export class AlphaDirective {
+  constructor(@Inject(forwardRef(() => ZetaDirective)) readonly zeta: unknown) {}
+}
+
+@Directive({ selector: "[appZeta]" })
+export class ZetaDirective {
+  constructor(readonly alpha: AlphaDirective) {}
+}
+`,
+      );
+      await write(
+        "app.module.ts",
+        `import { NgModule } from "ngjs-core";
+import { AlphaDirective, ZetaDirective } from "./directives";
+
+@NgModule({ declarations: [AlphaDirective, ZetaDirective], imports: [], providers: [] })
+export class AppModule {}
+`,
+      );
+      await write("main.ts", `import "./app.module";\n`);
+
+      // Un error al construir un controller va a `$exceptionHandler` (`$log.error` → la consola de jsdom).
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await bootstrap("<div app-alpha app-zeta></div>");
+        expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/^NG0200: dependencia circular/) }));
+      } finally {
+        error.mockRestore();
+      }
+    });
   });
 
   describe("multi-providers entre módulos", () => {

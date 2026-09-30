@@ -3,6 +3,7 @@ import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { ElementInstances, HOST_DATA_KEY } from "@/compiler/element-instances.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HostWiring } from "@/compiler/host-wiring.ts";
+import { InheritedFactory } from "@/compiler/inherited-factory.ts";
 import { InjectedValues } from "@/compiler/injected-values.ts";
 import { LifecycleWiring } from "@/compiler/lifecycle-wiring.ts";
 import { CodeEdit } from "@/compiler/code-edit.ts";
@@ -54,6 +55,8 @@ export class DecoratorWriter {
     const statements = MetadataStore.get(path).flatMap((metadata) => DecoratorWriter.statementsFor(metadata));
     // Una directiva/componente inyectada se lee del elemento con este helper (`ElementInstances`), uno por archivo.
     if (statements.some((statement) => statement.includes("ɵelementInstance("))) statements.push(ElementInstances.helperSource());
+    // El constructor heredado de una base de otro paquete se arma en runtime (`InheritedFactory`), uno por archivo.
+    if (statements.some((statement) => statement.includes(`${InheritedFactory.NAME}(`))) statements.push(InheritedFactory.helperSource());
     return statements.length ? CodeEdit.append(code, path, `\n${statements.join("\n")}\n`) : undefined;
   }
 
@@ -63,7 +66,7 @@ export class DecoratorWriter {
     // Import de efecto por cada archivo del que viene una dependencia del constructor: que se evalúe (y registre).
     const statements = [
       ...metadata.constructorImports.map((specifier) => `import ${JSON.stringify(specifier)};`),
-      DecoratorWriter.facStatement(metadata, ClassHierarchy.injectsByClass(declared)),
+      DecoratorWriter.facStatement(metadata, ClassHierarchy.injectsByClass(declared), ClassHierarchy.externalConstructorHops(declared)),
     ];
 
     switch (metadata.kind) {
@@ -107,8 +110,12 @@ export class DecoratorWriter {
    *
    * `injects`: los `inject()` de construcción de la clase Y sus bases (`ClassHierarchy.injectsByClass`), cada grupo
    * expuesto con la clave de la clase que lo declara — los campos de la base leen lo suyo aunque vivan en otro archivo.
+   *
+   * Como el `t` del factory de Ivy, construye `this.ɵT` si se lo piden (`InheritedFactory`: una subclase de otro
+   * paquete que hereda este constructor) — así sus args, sus `inject()` y su wiring de host valen para la subclase.
+   * `externalHops`: el constructor es el de una base de otro paquete; la instancia sale de `ɵsuper()`.
    */
-  private static facStatement(metadata: WritableMetadata, injects: { owner: string; tokens: InjectDep[] }[]): string {
+  private static facStatement(metadata: WritableMetadata, injects: { owner: string; tokens: InjectDep[] }[], externalHops?: number): string {
     const { className, constructorTokens, constructorFlags, constructorAttributes } = metadata;
     const injectTokens = injects.flatMap(({ tokens }) => tokens);
     // Flags (`@Optional()`/`@Self()`/…): se pide `ɵresolve` y se le pasa el token al construir (ver `ResolveDependency`).
@@ -140,9 +147,10 @@ export class DecoratorWriter {
       ...diIndexes.map((index) => depName(constructorTokens[index]!, constructorFlags[index])),
       ...injectedDi.map(({ token, flags }) => depName(token, flags)),
     ];
-    const params = [...ctorParams, ...injectParams].join(", ");
+    const inherited = externalHops !== undefined;
+    const params = [...(inherited ? ["ɵsuper"] : []), ...ctorParams, ...injectParams].join(", ");
     const construct = (assign: string) => {
-      const statement = `${assign}new ${className}(${ctorArgs});`;
+      const statement = inherited ? `${assign}ɵsuper();` : `${assign}new ${InheritedFactory.target(className)}(${ctorArgs});`;
       if (!injectTokens.length) return statement;
       let next = 0;
       const injectedValue = ({ token, flags }: InjectDep) => {
@@ -153,9 +161,11 @@ export class DecoratorWriter {
       return InjectedValues.around(byOwner, statement);
     };
 
+    const fac = (allDeps: string[], factory: string) =>
+      externalHops !== undefined ? InheritedFactory.statement(className, externalHops, `[${[...allDeps, factory].join(", ")}]`) : `${className}.ɵfac = [${[...allDeps, factory].join(", ")}];`;
+
     if (metadata.kind !== "component" && metadata.kind !== "directive") {
-      const factory = `function ${className}_Factory(${params}) { ${injectTokens.length ? construct("var instance = ") + " return instance;" : construct("return ")} }`;
-      return `${className}.ɵfac = [${[...deps, factory].join(", ")}];`;
+      return fac(deps, `function ${className}_Factory(${params}) { ${injectTokens.length ? construct("var instance = ") + " return instance;" : construct("return ")} }`);
     }
 
     const guard = DecoratorWriter.tagGuardStatement(metadata);
@@ -166,7 +176,7 @@ export class DecoratorWriter {
     const body = [guard, hostMark, construct("var instance = "), ...wiring, "return instance;"].filter(Boolean).join(" ");
     const allDeps = [...deps, ...HostWiring.FACTORY_DEPS.map((dep) => JSON.stringify(dep))];
 
-    return `${className}.ɵfac = [${[...allDeps, `function ${className}_Factory(${factoryParams}) { ${body} }`].join(", ")}];`;
+    return fac(allDeps, `function ${className}_Factory(${factoryParams}) { ${body} }`);
   }
 
   /**
@@ -196,7 +206,8 @@ export class DecoratorWriter {
     // ese nodo no tiene `tagName`, pero es el `<ng-template>`.
     const tag =
       '($element[0].nodeType === 8 && /ngTemplate/.test($element[0].nodeValue) ? "ng-template" : String($element[0].tagName || $element[0].nodeName).toLowerCase())';
-    return `var ɵtag = ${tag}; if (${tags}.indexOf(ɵtag) === -1) { console.warn(${warning} + ɵtag + ">."); return {}; }`;
+    // Construyendo una subclase (`this.ɵT`, ver `InheritedFactory`) el selector que vale es el de ella, no este.
+    return `var ɵtag = ${tag}; if (!(this && this.ɵT) && ${tags}.indexOf(ɵtag) === -1) { console.warn(${warning} + ɵtag + ">."); return {}; }`;
   }
 
   /** `undefined` = sin guard: selector no parseable acá, o alguna alternativa de la lista no exige tag. */

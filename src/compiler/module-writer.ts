@@ -3,6 +3,7 @@ import type { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { ClassHierarchy } from "@/compiler/class-hierarchy.ts";
 import { type BindingDef, ComponentBindings } from "@/compiler/component-bindings.ts";
 import { ComponentDefinition } from "@/compiler/component-definition.ts";
+import { ElementInstances } from "@/compiler/element-instances.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HashId } from "@/compiler/hash-id.ts";
 import { CodeEdit } from "@/compiler/code-edit.ts";
@@ -62,6 +63,9 @@ export class ModuleWriter {
     let scopedInjectorEmitted = false;
     // Cada módulo registra `ɵresolve` si alguna dependencia del proyecto lleva flags (`@Optional()`, …) — ver `ResolveDependency`.
     const registerResolve = this.scanner.usesInjectFlags();
+    // Cada módulo decora `$controller` si alguna clase elemento inyecta otra (del mismo elemento puede no estar
+    // construida todavía) — ver `ElementInstances.lazyControllerSource`.
+    const lazyControllers = this.scanner.usesElementInstances();
 
     const statements = modules.map((metadata) => {
       const node = this.scanner.get(metadata.className, path);
@@ -69,7 +73,7 @@ export class ModuleWriter {
       const isRoot = (metadata as NgModuleMetadata).bootstrap.length > 0;
       const attachScopedInjector = (isRoot && needsScopedInjector) || ModuleWriter.declaresScopedProviders(node);
       scopedInjectorEmitted ||= attachScopedInjector;
-      return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve);
+      return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve, lazyControllers);
     });
 
     const needsModuleWithProviders = modules.some((metadata) => this.scanner.get(metadata.className, path)!.callImports.length > 0);
@@ -79,6 +83,7 @@ export class ModuleWriter {
       modules.some((metadata) => (metadata as NgModuleMetadata).providers.some((provider) => provider.kind !== "class" && provider.multi));
     const prelude = [
       ...(scopedInjectorEmitted ? [ScopedInjectorRuntime.source()] : []),
+      ...(lazyControllers ? [ElementInstances.lazyControllerSource()] : []),
       ...(needsModuleWithProviders ? [ModuleWithProvidersRuntime.source()] : []),
       ...(needsMultiProviders ? [MultiProvidersRuntime.source()] : []),
     ]
@@ -96,7 +101,7 @@ export class ModuleWriter {
     return [...components, ...directives].some((declared) => (declared.metadata as ComponentMetadata | DirectiveMetadata).providers.length > 0);
   }
 
-  private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean, registerResolve: boolean): string {
+  private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean, registerResolve: boolean, lazyControllers: boolean): string {
     const id = ModuleWriter.idFor(node);
     // Cada llamada de `imports` (`ConfigModule.forRoot(options)`) se evalúa UNA vez: su resultado da el nombre
     // del módulo (`requires`) y los `providers` a registrar. Ver `ModuleWithProvidersRuntime`.
@@ -114,6 +119,7 @@ export class ModuleWriter {
       ...ModuleWriter.providerCalls(node, id),
       ...(registerResolve ? [ResolveDependency.factoryFragment()] : []),
       ...(attachScopedInjector ? [ScopedInjectorRuntime.decoratorFragment()] : []),
+      ...(lazyControllers ? [ElementInstances.decoratorFragment()] : []),
       ...node.declarations.components.flatMap((declared) => ModuleWriter.componentCall(declared, node.controllerAs)),
       ...node.declarations.directives.flatMap((declared) => ModuleWriter.directiveCall(declared, node.controllerAs)),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),

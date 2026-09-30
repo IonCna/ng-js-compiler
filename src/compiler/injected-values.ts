@@ -21,11 +21,16 @@ export class InjectedValues {
     return `(${InjectedValues.GLOBAL} && ${InjectedValues.GLOBAL}[${key}] ? ${value} : ${fallback})`;
   }
 
-  /** `statement` corriendo con `values` (`{ dueño: [valores...] }`) expuestos; se restaura lo anterior al terminar. */
+  /**
+   * `statement` corriendo con `values` (`{ dueño: [valores...] }`) expuestos; se restaura lo anterior al terminar.
+   * Se suman a los que ya estaban (lo propio pisa): una subclase de otro paquete expone los suyos y después el factory
+   * de su base (`InheritedFactory`) agrega los de la base, para el mismo `new`. Las claves son clases (únicas), así
+   * que una construcción anidada no lee valores ajenos.
+   */
   static around(values: Record<string, string[]>, statement: string): string {
     const object = Object.entries(values)
       .map(([owner, list]) => `${JSON.stringify(owner)}: [${list.join(", ")}]`)
       .join(", ");
-    return `var ɵprevious = ${InjectedValues.GLOBAL}; ${InjectedValues.GLOBAL} = { ${object} }; try { ${statement} } finally { ${InjectedValues.GLOBAL} = ɵprevious; }`;
+    return `var ɵprevious = ${InjectedValues.GLOBAL}; ${InjectedValues.GLOBAL} = Object.assign({}, ɵprevious, { ${object} }); try { ${statement} } finally { ${InjectedValues.GLOBAL} = ɵprevious; }`;
   }
 }

@@ -33,7 +33,7 @@ export const API = new InjectionToken<string>("api", { providedIn: "root", facto
     const http = JSON.stringify(TokenName.of("HttpClient", "ngjs-core"));
 
     expect(output).toContain(
-      `API.ɵprov = { token: ${JSON.stringify(own("API"))}, providedIn: "root", factory: [${http}, function (i0) { var ɵprevious = globalThis.ɵngjsInjected; globalThis.ɵngjsInjected = { "ɵfactory": [i0] }; try { return (() => globalThis.ɵngjsInjected["ɵfactory"][0].base + "/api")(); } finally { globalThis.ɵngjsInjected = ɵprevious; } }] };`,
+      `API.ɵprov = { token: ${JSON.stringify(own("API"))}, providedIn: "root", factory: [${http}, function (i0) { var ɵprevious = globalThis.ɵngjsInjected; globalThis.ɵngjsInjected = Object.assign({}, ɵprevious, { "ɵfactory": [i0] }); try { return (() => globalThis.ɵngjsInjected["ɵfactory"][0].base + "/api")(); } finally { globalThis.ɵngjsInjected = ɵprevious; } }] };`,
     );
     expect(output).toContain(`.push([${JSON.stringify(own("API"))}, API.ɵprov.factory]);`);
   });

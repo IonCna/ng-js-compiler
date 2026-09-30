@@ -43,6 +43,17 @@ export class ClassHierarchy {
     return { constructorTokens: owner.constructorTokens, constructorFlags: owner.constructorFlags, constructorAttributes: owner.constructorAttributes };
   }
 
+  /**
+   * Cuántos pasos de prototipo hay hasta la base que no está en el escaneo (otro paquete), si el constructor sale de
+   * ahí: ninguna clase de la cadena declara `constructor` y la raíz extiende algo. `undefined` si no — el constructor
+   * se conoce en build (el propio, el de una base del proyecto, o ninguno).
+   */
+  static externalConstructorHops(metadata: ClassMetadata, lookup: ClassLookup = storeLookup): number | undefined {
+    const chain = ClassHierarchy.chain(metadata, lookup);
+    if (!chain[0]!.superClass || chain.some((member) => member.hasConstructor !== false)) return undefined;
+    return chain.length;
+  }
+
   /** Los `inject()` de construcción de toda la cadena (raíz primero), agrupados por la clase que los declara. */
   static injectsByClass(metadata: ClassMetadata): { owner: string; tokens: InjectDep[] }[] {
     return ClassHierarchy.chain(metadata)
