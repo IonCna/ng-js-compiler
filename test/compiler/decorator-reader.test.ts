@@ -485,7 +485,7 @@ describe("DecoratorReader.read", () => {
 
     expect(metadata.inputs).toEqual([
       { propName: "value", bindingName: "value" },
-      { propName: "named", bindingName: "aka" },
+      { propName: "named", bindingName: "aka", required: true },
       { propName: "label", bindingName: "label", mode: "@" },
       { propName: "format", bindingName: "format" },
     ]);
@@ -495,13 +495,81 @@ describe("DecoratorReader.read", () => {
     expect(result).not.toMatch(/@(Input|Output|HostBinding)/);
   });
 
-  it("@Input({ transform }) o una opción desconocida es error en build (no se ignora)", async () => {
+  it("@Input({ transform }) guarda el texto de la función; una opción desconocida es error en build (no se ignora)", async () => {
+    await DecoratorReader.read(
+      `@Directive({ selector: "[a]" }) export class A { @Input({ transform: booleanAttribute }) on!: boolean; @Input({ transform: (v: string) => v.length }) size!: number; }`,
+      "a.ts",
+    );
+    const [metadata] = MetadataStore.get("a.ts") as [ComponentMetadata];
+    expect(metadata.inputs).toEqual([
+      { propName: "on", bindingName: "on", transformExpr: "booleanAttribute" },
+      { propName: "size", bindingName: "size", transformExpr: "(v: string) => v.length" },
+    ]);
     await expect(
-      DecoratorReader.read(`@Directive({ selector: "[a]" }) export class A { @Input({ transform: booleanAttribute }) on!: boolean; }`, "a.ts"),
-    ).rejects.toThrow("`transform` no está soportado");
+      DecoratorReader.read(`@Directive({ selector: "[c]" }) export class C { @Input({ transform: 1 }) on!: boolean; }`, "c.ts"),
+    ).rejects.toThrow("`transform` tiene que ser una función");
     await expect(
       DecoratorReader.read(`@Directive({ selector: "[b]" }) export class B { @Output({ foo: 1 }) done = 1; }`, "b.ts"),
     ).rejects.toThrow('opción "foo" desconocida');
+  });
+
+  it("inputs/outputs/host/queries del objeto del decorador, como Angular", async () => {
+    const code = `
+      @Component({
+        selector: "app-x",
+        template: "<i #icon></i>",
+        inputs: ["title", "count: total", { name: "open", alias: "isOpen", required: true, transform: booleanAttribute }],
+        outputs: ["closed", "change: valueChange"],
+        host: {
+          role: "button",
+          class: "btn",
+          "[class.active]": "open && !disabled",
+          "[attr.aria-label]": "this.title",
+          "(click)": "toggle($event); clicks = clicks + 1",
+          "(document:keydown.escape)": "close()",
+        },
+        queries: { icon: new ViewChild("icon"), items: new ContentChildren(ItemDirective, { descendants: true }) },
+      })
+      export class XComponent {}
+    `;
+
+    const result = await DecoratorReader.read(code, "x.ts");
+    const [metadata] = MetadataStore.get("x.ts") as [ComponentMetadata];
+
+    expect(metadata.inputs).toEqual([
+      { propName: "title", bindingName: "title" },
+      { propName: "count", bindingName: "total" },
+      { propName: "open", bindingName: "isOpen", required: true, transformExpr: "booleanAttribute" },
+    ]);
+    expect(metadata.outputs).toEqual([
+      { propName: "closed", bindingName: "closed" },
+      { propName: "change", bindingName: "valueChange" },
+    ]);
+    expect(metadata.hostAttributes).toEqual({ role: "button", class: "btn" });
+    expect(metadata.hostBindings).toEqual([
+      { propName: 'host["[class.active]"]', hostProperty: "class.active", expr: "instance.open && !instance.disabled" },
+      { propName: 'host["[attr.aria-label]"]', hostProperty: "attr.aria-label", expr: "instance.title" },
+    ]);
+    expect(metadata.hostListeners).toEqual([
+      { methodName: "", eventName: "click", args: [], handler: "instance.toggle(event); instance.clicks = instance.clicks + 1" },
+      { methodName: "", eventName: "document:keydown.escape", args: [], handler: "instance.close()" },
+    ]);
+    expect(metadata.queries).toEqual([
+      { kind: "view", propertyName: "icon", first: true, predicate: { kind: "names", names: ["icon"] }, descendants: true, static: false },
+      { kind: "content", propertyName: "items", first: false, predicate: { kind: "type", expr: "ItemDirective" }, descendants: true, static: false },
+    ]);
+    expect(result).not.toContain("queries");
+  });
+
+  it("inputs/outputs/host del decorador con una forma que no se puede leer en build es error", async () => {
+    const read = (options: string) => DecoratorReader.read(`@Directive({ selector: "[a]", ${options} }) export class A {}`, "a.ts");
+    await expect(read(`inputs: ["a: b: c"]`)).rejects.toThrow('no es "propiedad" ni "propiedad: alias"');
+    await expect(read(`inputs: names`)).rejects.toThrow("tiene que ser un array literal");
+    await expect(read(`outputs: [{ name: "x" }]`)).rejects.toThrow("cada output es un string literal");
+    await expect(read(`host: { "[title]": label }`)).rejects.toThrow("tiene que ser un string literal");
+    await expect(read(`host: { "[title]": "label | uppercase" }`)).rejects.toThrow("los pipes no están soportados");
+    await expect(read(`host: { "(click)": "items.forEach(i => i.x())" }`)).rejects.toThrow("no admite funciones");
+    await expect(read(`queries: { a: ViewChild("a") }`)).rejects.toThrow("tiene que ser `new ViewChild(...)`");
   });
 
   it("detecta métodos de lifecycle por nombre (sin decorador) y NO los toca en el código", async () => {

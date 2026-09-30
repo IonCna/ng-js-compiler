@@ -1,3 +1,4 @@
+import { InputTransforms } from "@/compiler/input-transforms.ts";
 import type { BindingsMetadata } from "@/metadata/decorator-metadata.ts";
 
 type Inputs = BindingsMetadata["inputs"];
@@ -87,14 +88,18 @@ export class LifecycleWiring {
    */
   private static onChangesStatement(className: string, inputs: Inputs): string {
     const entries = inputs
-      .map(
-        ({ propName }) => `
+      .map(({ propName, transformExpr }) => {
+        // Con `transform`, como Angular: los valores del cambio son los transformados (el anterior, si hubo).
+        const t = transformExpr !== undefined ? `var t = ${InputTransforms.lookupExpr(className, propName)};` : "";
+        const current = transformExpr !== undefined ? "t(c.currentValue)" : "c.currentValue";
+        const previous = transformExpr !== undefined ? "(c.isFirstChange() ? c.previousValue : t(c.previousValue))" : "c.previousValue";
+        return `
     (function () {
       var c = changesObj[${JSON.stringify(propName)}];
-      if (!c) return;
-      changes[${JSON.stringify(propName)}] = { previousValue: c.previousValue, currentValue: c.currentValue, firstChange: c.isFirstChange(), isFirstChange: function () { return c.isFirstChange(); } };
-    })();`,
-      )
+      if (!c) return;${t}
+      changes[${JSON.stringify(propName)}] = { previousValue: ${previous}, currentValue: ${current}, firstChange: c.isFirstChange(), isFirstChange: function () { return c.isFirstChange(); } };
+    })();`;
+      })
       .join("");
 
     return `${className}.prototype.$onChanges = function (changesObj) { var changes = {};${entries}\n    this.ngOnChanges(changes); };`;

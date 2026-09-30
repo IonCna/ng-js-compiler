@@ -23,6 +23,23 @@ export class HostWiring {
     return metadata.hostBindings.length > 0 || metadata.hostListeners.length > 0;
   }
 
+  /**
+   * Atributos estáticos de `host` (`{ role: "alert", class: "alert" }`), antes de construir la instancia (como Angular,
+   * que los pone al crear el elemento): `class`/`style` se suman a los del elemento; otro atributo que el elemento ya
+   * trae en el template queda como está. En el comentario ancla de un `<ng-template>` no hay elemento.
+   */
+  static attributeStatements(metadata: BindingsMetadata): string[] {
+    const entries = Object.entries(metadata.hostAttributes ?? {});
+    if (!entries.length) return [];
+    const applies = entries.map(([name, value]) => {
+      const literal = JSON.stringify(value);
+      if (name === "class") return `$element.addClass(${literal});`;
+      if (name === "style") return `$element[0].style.cssText += ";" + ${literal};`;
+      return `if (!$element[0].hasAttribute(${JSON.stringify(name)})) $element.attr(${JSON.stringify(name)}, ${literal});`;
+    });
+    return [`if ($element[0].nodeType === 1) { ${applies.join(" ")} }`];
+  }
+
   /** Statements a insertar entre `var instance = new X(...);` y `return instance;`. */
   static statements(metadata: BindingsMetadata, owner: string): string[] {
     const watches = metadata.hostBindings.map((binding, index) => HostWiring.watchStatement(binding, index, owner));
@@ -47,7 +64,7 @@ export class HostWiring {
     const applies = metadata.hostBindings.map((binding) => {
       const parsed = HostWiring.parseHostProperty(binding.hostProperty, owner, binding.propName);
       const apply = parsed.kind === "classMap" ? HostWiring.classMapExpr("v", "undefined") : `${HostWiring.applyExpr(parsed, "v")};`;
-      return `(function (v) { ${apply} })(instance.${binding.propName});`;
+      return `(function (v) { ${apply} })(${HostWiring.valueExpr(binding)});`;
     });
     return [
       "var ɵhostOnInit = instance.$onInit;",
@@ -55,9 +72,14 @@ export class HostWiring {
     ];
   }
 
+  /** `@HostBinding` lee la propiedad; `"[prop]": "expr"` de `host` trae su expresión ya traducida (`HostExpression`). */
+  private static valueExpr(binding: HostBinding): string {
+    return binding.expr ?? `instance.${binding.propName}`;
+  }
+
   private static watchStatement(binding: HostBinding, index: number, owner: string): string {
     const parsed = HostWiring.parseHostProperty(binding.hostProperty, owner, binding.propName);
-    const getter = `function () { return instance.${binding.propName}; }`;
+    const getter = `function () { return ${HostWiring.valueExpr(binding)}; }`;
     if (parsed.kind === "classMap") {
       // Por valor (`true`): un getter que arma un array/objeto nuevo en cada digest no es un cambio.
       return `var ɵunwatch${index} = $scope.$watch(${getter}, function (v, old) { ${HostWiring.classMapExpr("v", "old")} }, true);`;
@@ -76,7 +98,7 @@ export class HostWiring {
   private static listenerStatement(listener: HostListener, index: number): string {
     const parsed = HostWiring.parseEventName(listener.eventName);
     const args = listener.args.map((arg) => arg.replace(/^\$event/, "event")).join(", ");
-    const call = `instance.${listener.methodName}(${args});`;
+    const call = listener.handler !== undefined ? `${listener.handler};` : `instance.${listener.methodName}(${args});`;
     return [
       `var ɵhandler${index} = function (event) {`,
       parsed.key ? `  if (!${HostWiring.keyMatchExpr(parsed.key, parsed.modifiers)}) return;` : "",

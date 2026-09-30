@@ -12,7 +12,8 @@ export interface ManifestDeclaration {
   kind: "component" | "directive";
   selector: string;
   /** `name`: el nombre del binding (el atributo, en camelCase); `mode`: `<` (expresión) o `@` (interpolación). */
-  inputs: { property: string; name: string; mode: "<" | "@" }[];
+  /** `required`: `@Input({ required: true })` — el compilador de templates exige el atributo en cada uso. */
+  inputs: { property: string; name: string; mode: "<" | "@"; required?: true }[];
   outputs: { property: string; name: string }[];
 }
 
@@ -66,7 +67,12 @@ export class LibraryManifest {
         className: declared.className,
         kind,
         selector,
-        inputs: inputs.map((input) => ({ property: input.propName, name: input.bindingName, mode: input.mode ?? "<" })),
+        inputs: inputs.map((input) => ({
+          property: input.propName,
+          name: input.bindingName,
+          mode: input.mode ?? "<",
+          ...(input.required && { required: true as const }),
+        })),
         outputs: outputs.map((output) => ({ property: output.propName, name: output.bindingName })),
       });
     }
