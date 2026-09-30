@@ -19,7 +19,8 @@ import type {
   TsParameterProperty,
 } from "@swc/core";
 import { TokenName } from "@/compiler/token-name.ts";
-import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { CodeEdit } from "@/compiler/code-edit.ts";
+import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
 import { InjectedValues } from "@/compiler/injected-values.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import type {
@@ -144,11 +145,20 @@ export class DecoratorReader {
   };
 
   static async read(code: string, path: string): Promise<string | undefined> {
+    return (await DecoratorReader.readWithMap(code, path))?.code;
+  }
+
+  /** `read()` con el source map de lo que sacó (ver `decoratorReaderTransform`). */
+  static async readWithMap(code: string, path: string): Promise<TransformOutput | undefined> {
     const parsed = await DecoratorReader.parseFile(code, path);
-    if (!parsed) return undefined;
+    if (!parsed) {
+      // Se le sacaron los decoradores (o nunca tuvo): que no quede la metadata de una lectura anterior.
+      MetadataStore.delete(path);
+      return undefined;
+    }
 
     MetadataStore.set(path, parsed.metadata);
-    return DecoratorReader.stripSpans(code, parsed.stripSpans);
+    return DecoratorReader.stripSpans(code, path, parsed.stripSpans);
   }
 
   /** La metadata de las clases decoradas de un archivo, sin guardarla en `MetadataStore` (ver `LibraryManifest.fromSources`). */
@@ -178,19 +188,15 @@ export class DecoratorReader {
   }
 
   /**
-   * Saca (o reemplaza, con `replacement`) cada span de atrás para adelante — de adelante para atrás correr un
-   * splice invalidaría los offsets de los que faltan. Los `Span` de `@swc/core` son offsets en BYTES UTF-8 desde
-   * `BytePos(1)` (como en `source()`): se edita sobre el buffer, no sobre el string — con un índice de string, un
+   * Saca (o reemplaza, con `replacement`) cada span, con su source map (`CodeEdit`). Los `Span` de `@swc/core` son
+   * offsets en BYTES UTF-8 desde `BytePos(1)` (como en `source()`): se pasan a índice de string — sin eso, un
    * comentario con tildes antes del decorador corría el corte.
    */
-  private static stripSpans(code: string, spans: SourceEdit[]): string {
-    const sorted = [...spans].sort((a, b) => b.start - a.start);
-    const bytes = sorted.reduce(
-      (result, span) =>
-        Buffer.concat([result.subarray(0, span.start - 1), Buffer.from(span.replacement ?? "", "utf8"), result.subarray(span.end - 1)]),
-      Buffer.from(code, "utf8"),
-    );
-    return bytes.toString("utf8");
+  private static stripSpans(code: string, path: string, spans: SourceEdit[]): TransformOutput {
+    const indexOf = CodeEdit.byteToIndex(code);
+    const edit = CodeEdit.from(code, path);
+    for (const span of spans) edit.replace(indexOf(span.start - 1), indexOf(span.end - 1), span.replacement);
+    return edit.output();
   }
 
   /** `import { A as B } from "./x"` → `B → { symbol: "A", packageName: undefined }`; default/namespace no aplican (no son un símbolo con nombre). */
@@ -597,7 +603,7 @@ export class DecoratorReader {
   private static editedSource(node: Expression, edits: SourceEdit[], context: FileContext): string {
     const { start } = (node as Expression & { span: Span }).span;
     const local = edits.map((edit) => ({ ...edit, start: edit.start - start + 1, end: edit.end - start + 1 }));
-    return DecoratorReader.stripSpans(DecoratorReader.source(node, context), local);
+    return DecoratorReader.stripSpans(DecoratorReader.source(node, context), context.path, local).code;
   }
 
   /** Identificador → nombre de DI (`TokenName`); string literal → tal cual (nombre de AngularJS). */
@@ -1076,5 +1082,5 @@ export class DecoratorReader {
 }
 
 export const decoratorReaderTransform: NgjsTransform = {
-  transform: (code, path) => DecoratorReader.read(code, path),
+  transform: (code, path) => DecoratorReader.readWithMap(code, path),
 };

@@ -8,8 +8,10 @@
  * Necesita `globalThis.ɵngjsRootScope` — lo deja `PlatformCode.bootstrapModule()` cuando el bootstrap real
  * corrió (antes de eso no hay nada que hacer $apply, y el patch es un no-op seguro).
  *
- * Los tres puntos de entrada async que importan de verdad:
- * - `setTimeout`/`setInterval` nativos.
+ * Los puntos de entrada async que importan de verdad:
+ * - `setTimeout`/`setInterval`/`requestAnimationFrame`/`queueMicrotask` nativos.
+ * - `IntersectionObserver`/`MutationObserver`/`ResizeObserver`: el callback corre en la zona donde se construyó el
+ *   observer (como `patchClass` de Zone.js). Sin esto, el scrollspy cambiaba el activo fuera del digest.
  * - `addEventListener` nativo (con `removeEventListener` parcheado en pareja — sin esto, sacar un listener
  *   agregado con `addEventListener` en `ngOnInit` dejaría de andar, porque compararía por identidad de
  *   función contra el wrapper, no el original — un patrón MUY común, `WeakMap` guarda la relación).
@@ -24,8 +26,11 @@
  * no dispara digest (se decide al programar, como la zona de Angular) y, al correr, sigue afuera: lo que ESE callback
  * programe tampoco dispara digest (en Zone.js una tarea corre en la zona donde se programó).
  *
- * Fuera de alcance a propósito (no es Zone.js completo): fetch/XHR nativos, MutationObserver,
- * requestAnimationFrame, WebSocket.
+ * - Handlers por propiedad (`el.onclick`, `xhr.onload`, `ws.onmessage`, `reader.onload`, …): el setter guarda un
+ *   wrapper (como `patchOnProperties` de Zone.js); el getter devuelve lo que asignó el dev.
+ *
+ * Fuera de alcance: los handlers inline en el HTML (`<button onclick="...">`), que el navegador asigna sin pasar por
+ * el setter.
  */
 export class ZonePatchesRuntime {
   static source(): string {
@@ -70,6 +75,45 @@ export class ZonePatchesRuntime {
     var inside = ɵinside();
     return ɵsetTimeout.call(window, function () { ɵrunIn(inside, fn, null, extra); }, delay);
   };
+
+  if (typeof window.requestAnimationFrame === "function") {
+    var ɵrequestAnimationFrame = window.requestAnimationFrame;
+    window.requestAnimationFrame = function (fn) {
+      if (typeof fn !== "function") return ɵrequestAnimationFrame.apply(window, arguments);
+      var inside = ɵinside();
+      return ɵrequestAnimationFrame.call(window, function (time) { ɵrunIn(inside, fn, null, [time]); });
+    };
+  }
+
+  if (typeof window.queueMicrotask === "function") {
+    var ɵqueueMicrotask = window.queueMicrotask;
+    window.queueMicrotask = function (fn) {
+      if (typeof fn !== "function") return ɵqueueMicrotask.apply(window, arguments);
+      var inside = ɵinside();
+      return ɵqueueMicrotask.call(window, function () { ɵrunIn(inside, fn, null, []); });
+    };
+  }
+
+  // Observers nativos (como \`patchClass\` de Zone.js): el callback corre en la zona donde se CONSTRUYÓ el observer.
+  // El constructor parcheado comparte \`prototype\` con el nativo (\`instanceof\` sigue andando) y respeta \`new.target\`
+  // (una subclase del dev hereda del parcheado).
+  function ɵpatchObserver(name) {
+    var Native = window[name];
+    if (typeof Native !== "function") return;
+    var Patched = function (callback, options) {
+      var inside = ɵinside();
+      var wrapped = typeof callback === "function"
+        ? function () { return ɵrunIn(inside, callback, this, arguments); }
+        : callback;
+      return Reflect.construct(Native, [wrapped, options], new.target || Patched);
+    };
+    Patched.prototype = Native.prototype;
+    Object.setPrototypeOf(Patched, Native);
+    window[name] = Patched;
+  }
+  ɵpatchObserver("IntersectionObserver");
+  ɵpatchObserver("MutationObserver");
+  ɵpatchObserver("ResizeObserver");
 
   var ɵsetInterval = window.setInterval;
   window.setInterval = function (fn, delay) {
@@ -118,12 +162,28 @@ export class ZonePatchesRuntime {
     var entries = ɵwrappers.get(listener);
     // Como el nativo: el mismo listener dos veces en el mismo target/tipo/fase se registra una sola vez.
     if (ɵfindWrapper(entries, this, type, capture) !== -1) return;
-    var inside = ɵinside();
-    var wrapped = function (event) { return ɵrunIn(inside, listener, this, [event]); };
+    var once = typeof options === "object" && options !== null && !!options.once;
+    var signal = typeof options === "object" && options !== null ? options.signal : undefined;
+    // Con una señal ya abortada el nativo no registra nada: tampoco hay que anotarlo.
+    if (signal && signal.aborted) return ɵaddEventListener.call(this, type, listener, options);
     if (!entries) { entries = []; ɵwrappers.set(listener, entries); }
-    entries.push({ target: this, type: type, capture: capture, wrapped: wrapped });
-    return ɵaddEventListener.call(this, type, wrapped, options);
+    var inside = ɵinside();
+    var entry = { target: this, type: type, capture: capture, wrapped: null };
+    // \`once\`/\`signal\`: el navegador saca el listener solo, sin pasar por \`removeEventListener\` — la entrada se
+    // olvida acá, o volver a registrar el mismo handler quedaría bloqueado por el chequeo de duplicados.
+    entry.wrapped = function (event) {
+      if (once) ɵforget(entries, entry);
+      return ɵrunIn(inside, listener, this, [event]);
+    };
+    entries.push(entry);
+    if (signal) ɵaddEventListener.call(signal, "abort", function () { ɵforget(entries, entry); }, { once: true });
+    return ɵaddEventListener.call(this, type, entry.wrapped, options);
   };
+
+  function ɵforget(entries, entry) {
+    var index = entries.indexOf(entry);
+    if (index !== -1) entries.splice(index, 1);
+  }
 
   EventTarget.prototype.removeEventListener = function (type, listener, options) {
     if (typeof listener !== "function") return ɵremoveEventListener.call(this, type, listener, options);
@@ -137,6 +197,51 @@ export class ZonePatchesRuntime {
     }
     return ɵremoveEventListener.call(this, type, registered, options);
   };
+
+  // Handlers por propiedad (\`el.onclick = fn\`, \`xhr.onload = fn\`, \`ws.onmessage = fn\`), como \`patchOnProperties\` de
+  // Zone.js: el setter guarda un wrapper que corre en la zona donde se ASIGNÓ; el getter devuelve el original (el dev
+  // compara/lee lo que asignó). El valor de retorno se respeta (\`return false\`, \`onbeforeunload\`).
+  var ɵonHandlers = new WeakMap();
+  function ɵpatchOnProperties(target) {
+    if (!target) return;
+    Object.getOwnPropertyNames(target).forEach(function (name) {
+      if (name.slice(0, 2) !== "on") return;
+      var desc = Object.getOwnPropertyDescriptor(target, name);
+      if (!desc || !desc.get || !desc.set || !desc.configurable) return;
+      Object.defineProperty(target, name, {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: function () {
+          var current = desc.get.call(this);
+          var handlers = ɵonHandlers.get(this);
+          var entry = handlers && handlers[name];
+          return entry && entry.wrapped === current ? entry.original : current;
+        },
+        set: function (fn) {
+          var handlers = ɵonHandlers.get(this);
+          if (typeof fn !== "function") {
+            if (handlers) delete handlers[name];
+            return desc.set.call(this, fn);
+          }
+          var inside = ɵinside();
+          var wrapped = function () { return ɵrunIn(inside, fn, this, arguments); };
+          if (!handlers) { handlers = {}; ɵonHandlers.set(this, handlers); }
+          handlers[name] = { original: fn, wrapped: wrapped };
+          desc.set.call(this, wrapped);
+        },
+      });
+    });
+  }
+  ɵpatchOnProperties(window);
+  [
+    "Window", "Document", "Element", "HTMLElement", "SVGElement", "HTMLBodyElement", "HTMLFrameSetElement",
+    "XMLHttpRequest", "XMLHttpRequestEventTarget", "WebSocket", "FileReader", "Worker", "MessagePort",
+    "EventSource", "IDBRequest", "IDBOpenDBRequest", "IDBTransaction", "IDBDatabase", "Notification",
+    "MediaQueryList", "BroadcastChannel", "AbortSignal",
+  ].forEach(function (name) {
+    var ctor = window[name];
+    if (typeof ctor === "function") ɵpatchOnProperties(ctor.prototype);
+  });
 })();`;
   }
 }

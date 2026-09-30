@@ -39,4 +39,32 @@ describe("MetadataStore", () => {
 
     expect(MetadataStore.get("b.ts")).toEqual([]);
   });
+
+  it("delete() saca la entrada de un path", () => {
+    MetadataStore.set("a.ts", []);
+    MetadataStore.delete("a.ts");
+    expect(MetadataStore.entries()).toEqual([]);
+  });
+
+  it("within(): cada scope ve solo lo suyo, también después de un await, y no toca el scope por defecto", async () => {
+    const a = MetadataStore.scope();
+    const b = MetadataStore.scope();
+    const pipe = (className: string) => ({ kind: "pipe", className, options: { name: className }, constructorTokens: [], constructorFlags: [], constructorAttributes: [], injectTokens: [], constructorImports: [] }) as never;
+
+    await Promise.all([
+      MetadataStore.within(a, async () => {
+        MetadataStore.set("x.ts", [pipe("A")]);
+        await Promise.resolve();
+        expect(MetadataStore.get("x.ts")[0]).toMatchObject({ className: "A" });
+      }),
+      MetadataStore.within(b, async () => {
+        MetadataStore.set("x.ts", [pipe("B")]);
+        await Promise.resolve();
+        expect(MetadataStore.get("x.ts")[0]).toMatchObject({ className: "B" });
+      }),
+    ]);
+
+    expect(MetadataStore.get("x.ts")).toEqual([]);
+  });
 });
+

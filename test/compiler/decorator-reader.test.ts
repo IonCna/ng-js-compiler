@@ -1,32 +1,32 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ComponentMetadata, NgModuleMetadata, PipeMetadata, ServiceMetadata } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
-import { decoratorReaderTransform } from "@/compiler/decorator-reader.ts";
+import { DecoratorReader } from "@/compiler/decorator-reader.ts";
 import { TokenName } from "@/compiler/token-name.ts";
 
 /** Paquete de los archivos de test (`card.ts` relativo al cwd → el `package.json` del compilador). */
 const own = (symbol: string) => TokenName.of(symbol, "ng-js-compiler");
 
-describe("decoratorReaderTransform", () => {
+describe("DecoratorReader.read", () => {
   afterEach(() => {
     MetadataStore.clear();
   });
 
   it("devuelve undefined si no hay decoradores conocidos (no toca nada)", async () => {
-    const result = await decoratorReaderTransform.transform("export class Plain {}", "plain.ts");
+    const result = await DecoratorReader.read("export class Plain {}", "plain.ts");
     expect(result).toBeUndefined();
   });
 
   it("saca el decorador de clase reconocido del código — no debe seguir ejecutándose en runtime", async () => {
     const code = `@Component({ selector: "app-card" }) export class CardComponent {}`;
-    const result = await decoratorReaderTransform.transform(code, "card.ts");
+    const result = await DecoratorReader.read(code, "card.ts");
 
     expect(result).not.toContain("@Component");
     expect(result).toContain("export class CardComponent {}");
   });
 
   it("no guarda nada si no hay decoradores conocidos", async () => {
-    await decoratorReaderTransform.transform("export class Plain {}", "plain.ts");
+    await DecoratorReader.read("export class Plain {}", "plain.ts");
     expect(MetadataStore.get("plain.ts")).toEqual([]);
   });
 
@@ -39,7 +39,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    await decoratorReaderTransform.transform(code, "card.ts");
+    await DecoratorReader.read(code, "card.ts");
     const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
 
     expect(metadata.constructorTokens).toEqual([own("SomeToken"), own("HttpClient")]);
@@ -48,7 +48,7 @@ describe("decoratorReaderTransform", () => {
   it("texto no ASCII antes del decorador (comentario con tildes): se saca el decorador justo, sin correr el corte", async () => {
     const code = `// configuración del módulo — ñandú\n@Injectable()\nexport class FooService {\n  constructor(@Inject("$http") private http: unknown) {}\n}\n`;
 
-    const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+    const result = await DecoratorReader.read(code, "foo.service.ts");
 
     expect(result).toBe(`// configuración del módulo — ñandú\n\nexport class FooService {\n  constructor( private http: unknown) {}\n}\n`);
   });
@@ -66,7 +66,7 @@ describe("decoratorReaderTransform", () => {
         }
       `;
 
-      await decoratorReaderTransform.transform(code, "card.ts");
+      await DecoratorReader.read(code, "card.ts");
       const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
 
       expect(metadata.providers).toEqual([
@@ -78,7 +78,7 @@ describe("decoratorReaderTransform", () => {
     });
 
     it("@Attribute('x'): no es DI, queda el nombre del atributo; en un servicio es error en build", async () => {
-      await decoratorReaderTransform.transform(
+      await DecoratorReader.read(
         `export class HttpClient {} @Directive({ selector: "[appBtn]" }) export class BtnDirective { constructor(@Attribute("type") type: string, http: HttpClient) {} }`,
         "btn.ts",
       );
@@ -87,7 +87,7 @@ describe("decoratorReaderTransform", () => {
       expect(metadata.constructorAttributes).toEqual(["type", null]);
       expect(metadata.constructorTokens).toEqual(["", own("HttpClient")]);
       await expect(
-        decoratorReaderTransform.transform(`@Injectable() export class Foo { constructor(@Attribute("type") type: string) {} }`, "foo.ts"),
+        DecoratorReader.read(`@Injectable() export class Foo { constructor(@Attribute("type") type: string) {} }`, "foo.ts"),
       ).rejects.toThrow(/@Attribute\(\) solo existe en @Component\/@Directive/);
     });
 
@@ -103,7 +103,7 @@ describe("decoratorReaderTransform", () => {
         export class AppModule {}
       `;
 
-      await decoratorReaderTransform.transform(code, "app.module.ts");
+      await DecoratorReader.read(code, "app.module.ts");
       const [metadata] = MetadataStore.get("app.module.ts") as [NgModuleMetadata];
 
       expect(metadata.providers).toEqual([
@@ -120,7 +120,7 @@ describe("decoratorReaderTransform", () => {
     });
 
     it("@Injectable con receta: queda como recipe (el token es la propia clase)", async () => {
-      await decoratorReaderTransform.transform(
+      await DecoratorReader.read(
         `@Injectable({ providedIn: "root", useFactory: (http: unknown) => new Impl(http), deps: [Http] }) export abstract class Api {}`,
         "api.ts",
       );
@@ -144,7 +144,7 @@ describe("decoratorReaderTransform", () => {
         }
       `;
 
-      const result = await decoratorReaderTransform.transform(code, "tabs.ts");
+      const result = await DecoratorReader.read(code, "tabs.ts");
       const [metadata] = MetadataStore.get("tabs.ts") as [ComponentMetadata];
 
       for (const decorator of ["@ViewChild", "@ViewChildren", "@ContentChild", "@ContentChildren"]) expect(result).not.toContain(decorator);
@@ -164,7 +164,7 @@ describe("decoratorReaderTransform", () => {
         export class MenuDirective {}
       `;
 
-      await decoratorReaderTransform.transform(code, "menu.ts");
+      await DecoratorReader.read(code, "menu.ts");
       const [metadata] = MetadataStore.get("menu.ts") as [ComponentMetadata];
 
       expect(metadata.hostDirectives).toEqual([
@@ -176,7 +176,7 @@ describe("decoratorReaderTransform", () => {
     it("una opción desconocida en una query es error en build", async () => {
       const code = `@Component({ selector: "app-x" }) export class X { @ViewChild(Y, { lazy: true }) y!: unknown; }`;
 
-      await expect(decoratorReaderTransform.transform(code, "x.ts")).rejects.toThrow(/"X.y" — @ViewChild: opción "lazy" desconocida/);
+      await expect(DecoratorReader.read(code, "x.ts")).rejects.toThrow(/"X.y" — @ViewChild: opción "lazy" desconocida/);
     });
   });
 
@@ -189,7 +189,7 @@ describe("decoratorReaderTransform", () => {
         @Injectable() export class FooService { constructor(http: HttpClient) {} }
       `;
 
-      await decoratorReaderTransform.transform(code, "card.ts");
+      await DecoratorReader.read(code, "card.ts");
       const [card, foo] = MetadataStore.get("card.ts") as [ComponentMetadata, ServiceMetadata];
 
       expect(card).toMatchObject({ superClass: "BaseCard", hasConstructor: false });
@@ -200,7 +200,7 @@ describe("decoratorReaderTransform", () => {
     it("una clase SIN decorador que usa features de Angular es error en build (como Angular desde v10)", async () => {
       const code = `@Component({ selector: "app-card" }) export class CardComponent {}\nexport abstract class Base { @Input() label = ""; }`;
 
-      await expect(decoratorReaderTransform.transform(code, "card.ts")).rejects.toThrow(
+      await expect(DecoratorReader.read(code, "card.ts")).rejects.toThrow(
         /"Base" usa @Input pero no tiene decorador de clase — agregale @Directive\(\)\/@Injectable\(\)/,
       );
     });
@@ -220,7 +220,7 @@ describe("decoratorReaderTransform", () => {
         }
       `;
 
-      const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+      const result = await DecoratorReader.read(code, "foo.service.ts");
       const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
 
       // Fuera de un `ɵfac` (`new FooService()` en `runInInjectionContext`) queda el `inject()` original de respaldo.
@@ -244,7 +244,7 @@ describe("decoratorReaderTransform", () => {
         }
       `;
 
-      const result = await decoratorReaderTransform.transform(code, "foo.directive.ts");
+      const result = await DecoratorReader.read(code, "foo.directive.ts");
       const [metadata] = MetadataStore.get("foo.directive.ts") as [ComponentMetadata];
 
       expect(result).toContain(
@@ -264,7 +264,7 @@ describe("decoratorReaderTransform", () => {
         }
       `;
 
-      const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+      const result = await DecoratorReader.read(code, "foo.service.ts");
       const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
 
       expect(metadata.injectTokens).toEqual([]);
@@ -278,7 +278,7 @@ describe("decoratorReaderTransform", () => {
     ])("%s es error en build", async (_, call, message) => {
       const code = `@Injectable() export class FooService { private logger = ${call}; }`;
 
-      await expect(decoratorReaderTransform.transform(code, "foo.service.ts")).rejects.toThrow(message);
+      await expect(DecoratorReader.read(code, "foo.service.ts")).rejects.toThrow(message);
     });
   });
 
@@ -292,7 +292,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    const result = await decoratorReaderTransform.transform(code, "card.ts");
+    const result = await DecoratorReader.read(code, "card.ts");
     const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
 
     for (const decorator of ["@Self", "@SkipSelf", "@Optional", "@Host"]) expect(result).not.toContain(decorator);
@@ -310,7 +310,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    const result = await decoratorReaderTransform.transform(code, "foo.service.ts");
+    const result = await DecoratorReader.read(code, "foo.service.ts");
     const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
 
     expect(result).not.toContain("@Optional");
@@ -326,7 +326,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    await decoratorReaderTransform.transform(code, "foo.service.ts");
+    await DecoratorReader.read(code, "foo.service.ts");
     const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
 
     expect(metadata.constructorTokens).toEqual(["$http"]);
@@ -341,7 +341,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    await expect(decoratorReaderTransform.transform(code, "card.ts")).rejects.toThrow(
+    await expect(DecoratorReader.read(code, "card.ts")).rejects.toThrow(
       /"CardComponent" — el parámetro 1 del constructor no tiene tipo de clase ni @Inject()/,
     );
   });
@@ -354,7 +354,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    await expect(decoratorReaderTransform.transform(code, "scroll.ts")).rejects.toThrow(/el tipo "Window" .* usá @Inject\(TOKEN\)/);
+    await expect(DecoratorReader.read(code, "scroll.ts")).rejects.toThrow(/el tipo "Window" .* usá @Inject\(TOKEN\)/);
   });
 
   it("resuelve el nombre de DI por el import: paquete del specifier, símbolo exportado (no el alias), import type incluido", async () => {
@@ -369,7 +369,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    await decoratorReaderTransform.transform(code, "card.ts");
+    await DecoratorReader.read(code, "card.ts");
     const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
 
     expect(metadata.constructorTokens).toEqual([
@@ -400,7 +400,7 @@ describe("decoratorReaderTransform", () => {
         export class Svc { constructor(a: Logger, b: Http, c: Store) {} }
       `;
       const path = join(dir, "svc.ts");
-      await decoratorReaderTransform.transform(code, path);
+      await DecoratorReader.read(code, path);
       const [metadata] = MetadataStore.get(path) as [ServiceMetadata];
 
       expect(metadata.constructorTokens).toEqual([TokenName.of("Logger", "my-lib"), TokenName.of("Http", "my-lib"), TokenName.of("Store", "@acme/store")]);
@@ -410,7 +410,7 @@ describe("decoratorReaderTransform", () => {
   });
 
   it("un servicio lleva su propio nombre de DI (token) — el mismo que calcula quien lo importa", async () => {
-    await decoratorReaderTransform.transform(`@Injectable() export class UserService {}`, "user.service.ts");
+    await DecoratorReader.read(`@Injectable() export class UserService {}`, "user.service.ts");
     const [metadata] = MetadataStore.get("user.service.ts") as [ServiceMetadata];
 
     expect(metadata.token).toBe(own("UserService"));
@@ -421,7 +421,7 @@ describe("decoratorReaderTransform", () => {
       '@Component({ selector: "app-a", template: `<a href="x">\n  \'b\'</a>` }) export class A {}',
       "@Component({ selector: \"app-b\", template: `<b>${name}</b>` }) export class B {}",
     ].join("\n");
-    await decoratorReaderTransform.transform(code, "tpl.ts");
+    await DecoratorReader.read(code, "tpl.ts");
 
     const [a, b] = MetadataStore.get("tpl.ts") as [ComponentMetadata, ComponentMetadata];
     expect(a.options).toEqual({ selector: "app-a", template: "<a href=\"x\">\n  'b'</a>" });
@@ -445,7 +445,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    const result = await decoratorReaderTransform.transform(code, "card.ts");
+    const result = await DecoratorReader.read(code, "card.ts");
     for (const decorator of ["@Component", "@Input", "@Output", "@HostBinding", "@HostListener", "@Inject"]) {
       expect(result).not.toContain(decorator);
     }
@@ -480,7 +480,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    const result = await decoratorReaderTransform.transform(code, "x.ts");
+    const result = await DecoratorReader.read(code, "x.ts");
     const [metadata] = MetadataStore.get("x.ts") as [ComponentMetadata];
 
     expect(metadata.inputs).toEqual([
@@ -497,10 +497,10 @@ describe("decoratorReaderTransform", () => {
 
   it("@Input({ transform }) o una opción desconocida es error en build (no se ignora)", async () => {
     await expect(
-      decoratorReaderTransform.transform(`@Directive({ selector: "[a]" }) export class A { @Input({ transform: booleanAttribute }) on!: boolean; }`, "a.ts"),
+      DecoratorReader.read(`@Directive({ selector: "[a]" }) export class A { @Input({ transform: booleanAttribute }) on!: boolean; }`, "a.ts"),
     ).rejects.toThrow("`transform` no está soportado");
     await expect(
-      decoratorReaderTransform.transform(`@Directive({ selector: "[b]" }) export class B { @Output({ foo: 1 }) done = 1; }`, "b.ts"),
+      DecoratorReader.read(`@Directive({ selector: "[b]" }) export class B { @Output({ foo: 1 }) done = 1; }`, "b.ts"),
     ).rejects.toThrow('opción "foo" desconocida');
   });
 
@@ -518,7 +518,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    const result = await decoratorReaderTransform.transform(code, "card.ts");
+    const result = await DecoratorReader.read(code, "card.ts");
     // Ninguno se saca del código — a diferencia de los decoradores, son métodos comunes.
     expect(result).toContain("ngOnChanges(changes: unknown) {}");
     expect(result).toContain("ngOnInit() {}");
@@ -539,7 +539,7 @@ describe("decoratorReaderTransform", () => {
   });
 
   it("sin ningún método de lifecycle, lifecycleHooks queda vacío", async () => {
-    await decoratorReaderTransform.transform(`@Component({ selector: "app-card" }) export class CardComponent {}`, "card.ts");
+    await DecoratorReader.read(`@Component({ selector: "app-card" }) export class CardComponent {}`, "card.ts");
     const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
 
     expect(metadata.lifecycleHooks).toEqual([]);
@@ -551,7 +551,7 @@ describe("decoratorReaderTransform", () => {
       @Component({ selector: "app-card", providers: [SomeService, OtherService] }) export class CardComponent {}
     `;
 
-    await decoratorReaderTransform.transform(code, "card.ts");
+    await DecoratorReader.read(code, "card.ts");
     const [metadata] = MetadataStore.get("card.ts") as [ComponentMetadata];
 
     expect(metadata.providers).toEqual([
@@ -563,7 +563,7 @@ describe("decoratorReaderTransform", () => {
   describe("imports de @NgModule", () => {
     async function importsOf(imports: string): Promise<NgModuleMetadata["imports"]> {
       const code = `@NgModule({ declarations: [], imports: ${imports} }) export class AppModule {}`;
-      await decoratorReaderTransform.transform(code, "app.module.ts");
+      await DecoratorReader.read(code, "app.module.ts");
       return (MetadataStore.get("app.module.ts") as [NgModuleMetadata])[0].imports;
     }
 
@@ -603,7 +603,7 @@ describe("decoratorReaderTransform", () => {
         import { API_URL, Logger, ConsoleLogger, HttpClient } from "./tokens";
         @NgModule({ declarations: [], imports: [], providers: ${providers} }) export class AppModule {}
       `;
-      await decoratorReaderTransform.transform(code, "app.module.ts");
+      await DecoratorReader.read(code, "app.module.ts");
       return (MetadataStore.get("app.module.ts") as [NgModuleMetadata])[0].providers;
     }
 
@@ -652,7 +652,7 @@ describe("decoratorReaderTransform", () => {
 
   it("lee @Pipe sin bindings", async () => {
     const code = `@Pipe({ name: "truncate" }) export class TruncatePipe { transform(v: unknown) { return v; } }`;
-    await decoratorReaderTransform.transform(code, "truncate.ts");
+    await DecoratorReader.read(code, "truncate.ts");
 
     const [metadata] = MetadataStore.get("truncate.ts") as [PipeMetadata];
     expect(metadata.kind).toBe("pipe");
@@ -660,8 +660,8 @@ describe("decoratorReaderTransform", () => {
   });
 
   it("lee @Service y @Injectable como kinds distintos", async () => {
-    await decoratorReaderTransform.transform(`@Service() export class FooService {}`, "foo.service.ts");
-    await decoratorReaderTransform.transform(`@Injectable() export class BarService {}`, "bar.service.ts");
+    await DecoratorReader.read(`@Service() export class FooService {}`, "foo.service.ts");
+    await DecoratorReader.read(`@Injectable() export class BarService {}`, "bar.service.ts");
 
     const [foo] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
     const [bar] = MetadataStore.get("bar.service.ts") as [ServiceMetadata];
@@ -676,7 +676,7 @@ describe("decoratorReaderTransform", () => {
       export class AppModule {}
     `;
 
-    await decoratorReaderTransform.transform(code, "app.module.ts");
+    await DecoratorReader.read(code, "app.module.ts");
     const [metadata] = MetadataStore.get("app.module.ts") as [NgModuleMetadata];
 
     expect(metadata.kind).toBe("ngmodule");
@@ -692,7 +692,7 @@ describe("decoratorReaderTransform", () => {
       export class AppModule {}
     `;
 
-    await decoratorReaderTransform.transform(code, "app.module.ts");
+    await DecoratorReader.read(code, "app.module.ts");
     const [metadata] = MetadataStore.get("app.module.ts") as [NgModuleMetadata];
 
     expect(metadata.bootstrap).toEqual(["AppComponent"]);
@@ -710,7 +710,7 @@ describe("decoratorReaderTransform", () => {
       }
     `;
 
-    const result = await decoratorReaderTransform.transform(code, "app.module.ts");
+    const result = await DecoratorReader.read(code, "app.module.ts");
     const [metadata] = MetadataStore.get("app.module.ts") as [NgModuleMetadata];
 
     expect(metadata.token).toBe(own("AppModule"));
@@ -729,7 +729,7 @@ describe("decoratorReaderTransform", () => {
       export class AppModule { constructor(@Attribute("x") x: string) {} }
     `;
 
-    await expect(decoratorReaderTransform.transform(code, "app.module.ts")).rejects.toThrow(/@Attribute\(\) solo existe en @Component\/@Directive/);
+    await expect(DecoratorReader.read(code, "app.module.ts")).rejects.toThrow(/@Attribute\(\) solo existe en @Component\/@Directive/);
   });
 
   it("lee más de una clase decorada por archivo", async () => {
@@ -737,7 +737,7 @@ describe("decoratorReaderTransform", () => {
       @Injectable() export class AService {}
       @Injectable() export class BService {}
     `;
-    await decoratorReaderTransform.transform(code, "multi.ts");
+    await DecoratorReader.read(code, "multi.ts");
     expect(MetadataStore.get("multi.ts")).toHaveLength(2);
   });
 });

@@ -300,7 +300,7 @@ export class CardComponent {
     const output = new ModuleWriter(scanner).write("export class AppModule {}", modulePath)!;
 
     expect(output).toContain(
-      '.directive("appCard", function () { return { controller: CardComponent.ɵfac, template: "<b><ng-content></ng-content></b>", controllerAs: "$ctrl", transclude: true, restrict: "A", scope: {}, bindToController: {"title":"<?"} }; })',
+      '.directive("appCard", function () { return { controller: CardComponent.ɵfac, template: "<b><ng-content></ng-content></b>", controllerAs: "$ctrl", transclude: true, restrict: "A", scope: {}, bindToController: {"title":"<?ngTitle"} }; })',
     );
   });
 

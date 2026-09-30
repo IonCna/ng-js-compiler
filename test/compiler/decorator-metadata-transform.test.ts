@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { decoratorMetadataTransform } from "@/compiler/decorator-metadata-transform.ts";
+import type { TransformOutput } from "@/compiler/ngjs-transform.ts";
+
+const swc = async (code: string, path: string) => (await decoratorMetadataTransform.transform(code, path)) as TransformOutput;
 
 describe("decoratorMetadataTransform", () => {
   it("pasa TS → JS sin emitir design:paramtypes (los tokens ya salen resueltos en ɵfac)", async () => {
@@ -11,7 +14,7 @@ describe("decoratorMetadataTransform", () => {
       }
     `;
 
-    const result = await decoratorMetadataTransform.transform(code, "api.ts");
+    const result = (await swc(code, "api.ts")).code;
 
     expect(result).not.toContain("design:paramtypes");
     expect(result).not.toContain(": Config");
@@ -39,7 +42,7 @@ describe("decoratorMetadataTransform", () => {
       export async function* stream() { yield await Promise.resolve(1); }
     `;
 
-    const result = (await decoratorMetadataTransform.transform(code, "loader.ts"))!;
+    const result = (await swc(code, "loader.ts")).code;
 
     expect(result).not.toMatch(/\bawait\b/);
     expect(result).not.toMatch(/\basync\s+(function|\(|\w+\s*\()/);

@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { ZonePatchesRuntime } from "@/compiler/zone-patches-runtime.ts";
 
 /** Evalúa `source()` en una ventana jsdom fresca (aislada por test) y devuelve esa ventana ya parcheada. */
-function evaluate(): Window & typeof globalThis {
-  const dom = new JSDOM("<!doctype html><body></body>", { runScripts: "outside-only" });
+function evaluate(setup?: (win: Window & typeof globalThis) => void): Window & typeof globalThis {
+  const dom = new JSDOM("<!doctype html><body></body>", { runScripts: "outside-only", pretendToBeVisual: true });
+  setup?.(dom.window as unknown as Window & typeof globalThis);
   dom.window.eval(ZonePatchesRuntime.source());
   return dom.window as unknown as Window & typeof globalThis;
 }
@@ -262,5 +263,196 @@ describe("ZonePatchesRuntime", () => {
     let ran = false;
     await new Promise<void>((resolve) => win.setTimeout(() => { ran = true; resolve(); }, 0));
     expect(ran).toBe(true);
+  });
+
+  it("requestAnimationFrame: dispara $apply después del callback", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    await new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
+    expect(scope.calls).toBe(1);
+  });
+
+  it("queueMicrotask: dispara $apply después del callback", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    await new Promise<void>((resolve) => win.queueMicrotask(() => resolve()));
+    expect(scope.calls).toBe(1);
+  });
+
+  it("MutationObserver: el callback dispara $apply", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    const el = win.document.createElement("div");
+    const observed = new Promise<void>((resolve) => {
+      const observer = new win.MutationObserver(() => {
+        observer.disconnect();
+        resolve();
+      });
+      observer.observe(el, { attributes: true });
+    });
+    el.setAttribute("id", "x");
+
+    await observed;
+    expect(scope.calls).toBe(1);
+  });
+
+  it("IntersectionObserver/ResizeObserver: el callback corre en la zona donde se construyó; instanceof y subclases siguen andando", () => {
+    // jsdom no los trae: un nativo falso que guarda el callback para dispararlo a mano.
+    const win = evaluate((w) => {
+      for (const name of ["IntersectionObserver", "ResizeObserver"]) {
+        (w as unknown as Record<string, unknown>)[name] = class {
+          constructor(public callback: (...args: unknown[]) => void, public options?: unknown) {}
+          trigger(entries: unknown[]) {
+            this.callback(entries, this);
+          }
+        };
+      }
+    });
+    const scope = fakeScope();
+    const globals = win as unknown as {
+      ɵngjsRootScope: unknown;
+      ɵngjsOutsideAngular: number;
+      IntersectionObserver: new (cb: (...args: unknown[]) => void, options?: unknown) => { trigger(entries: unknown[]): void; options: unknown };
+      ResizeObserver: new (cb: (...args: unknown[]) => void) => { trigger(entries: unknown[]): void };
+    };
+    globals.ɵngjsRootScope = scope;
+
+    let received: unknown[] = [];
+    const inside = new globals.IntersectionObserver((entries) => (received = entries as unknown[]), { threshold: 1 });
+    expect(inside).toBeInstanceOf(globals.IntersectionObserver);
+    expect(inside.options).toEqual({ threshold: 1 });
+    inside.trigger(["entry"]);
+    expect(received).toEqual(["entry"]);
+    expect(scope.calls).toBe(1);
+
+    class Sub extends globals.ResizeObserver {}
+    const sub = new Sub(() => {});
+    expect(sub).toBeInstanceOf(Sub);
+    sub.trigger([]);
+    expect(scope.calls).toBe(2);
+
+    globals.ɵngjsOutsideAngular = 1;
+    const outside = new globals.IntersectionObserver(() => {});
+    globals.ɵngjsOutsideAngular = 0;
+    outside.trigger([]);
+    expect(scope.calls).toBe(2);
+  });
+
+  it("handlers por propiedad (el.onclick): dispara $apply, el getter devuelve el original y el retorno se respeta", () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    const el = win.document.createElement("button");
+    let clicks = 0;
+    const handler = () => {
+      clicks++;
+      return false;
+    };
+    el.onclick = handler;
+    expect(el.onclick).toBe(handler);
+
+    const event = new win.MouseEvent("click", { cancelable: true });
+    el.dispatchEvent(event);
+    expect(clicks).toBe(1);
+    expect(scope.calls).toBe(1);
+    // `return false` en un handler por propiedad cancela el evento: el wrapper tiene que devolverlo.
+    expect(event.defaultPrevented).toBe(true);
+
+    el.onclick = null;
+    expect(el.onclick).toBeNull();
+    el.dispatchEvent(new win.MouseEvent("click"));
+    expect(clicks).toBe(1);
+    expect(scope.calls).toBe(1);
+  });
+
+  it("handlers por propiedad asignados dentro de runOutsideAngular no disparan $apply", () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    const globals = win as unknown as { ɵngjsRootScope: unknown; ɵngjsOutsideAngular: number };
+    globals.ɵngjsRootScope = scope;
+
+    const el = win.document.createElement("button");
+    let clicks = 0;
+    globals.ɵngjsOutsideAngular = 1;
+    el.onclick = () => {
+      clicks++;
+    };
+    globals.ɵngjsOutsideAngular = 0;
+
+    el.dispatchEvent(new win.MouseEvent("click"));
+    expect(clicks).toBe(1);
+    expect(scope.calls).toBe(0);
+  });
+
+  it("handlers por propiedad fuera del DOM (xhr.onload): el getter devuelve el original", () => {
+    const win = evaluate();
+    const xhr = new win.XMLHttpRequest();
+    const handler = () => {};
+    xhr.onload = handler;
+    expect(xhr.onload).toBe(handler);
+  });
+
+  it("addEventListener con { once: true }: tras dispararse, el mismo handler se puede volver a registrar", () => {
+    const win = evaluate();
+    const el = win.document.createElement("button");
+    let clicks = 0;
+    const handler = () => {
+      clicks++;
+    };
+
+    el.addEventListener("click", handler, { once: true });
+    el.dispatchEvent(new win.Event("click"));
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(1);
+
+    el.addEventListener("click", handler);
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(2);
+  });
+
+  it("addEventListener con signal: tras abort(), el mismo handler se puede volver a registrar", () => {
+    const win = evaluate();
+    const el = win.document.createElement("button");
+    let clicks = 0;
+    const handler = () => {
+      clicks++;
+    };
+
+    const controller = new win.AbortController();
+    el.addEventListener("click", handler, { signal: controller.signal });
+    el.dispatchEvent(new win.Event("click"));
+    controller.abort();
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(1);
+
+    el.addEventListener("click", handler);
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(2);
+  });
+
+  it("addEventListener con una señal ya abortada no registra nada (ni bloquea un registro posterior)", () => {
+    const win = evaluate();
+    const el = win.document.createElement("button");
+    let clicks = 0;
+    const handler = () => {
+      clicks++;
+    };
+
+    const controller = new win.AbortController();
+    controller.abort();
+    el.addEventListener("click", handler, { signal: controller.signal });
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(0);
+
+    el.addEventListener("click", handler);
+    el.dispatchEvent(new win.Event("click"));
+    expect(clicks).toBe(1);
   });
 });

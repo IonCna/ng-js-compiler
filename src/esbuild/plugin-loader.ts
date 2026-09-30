@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { ApplicationScanner } from "@/compiler/application-scanner.ts";
 import { createNgjsCompilerTransforms } from "@/compiler/ngjs-compiler-transforms.ts";
+import { TransformChain } from "@/compiler/transform-chain.ts";
 import { PlatformCode, type ProjectType } from "@/compiler/platform-code.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { AsyncDownlevel } from "@/compiler/async-downlevel.ts";
@@ -66,14 +67,13 @@ export function pluginLoader(
       build.onLoad({ filter: /\.ts$/ }, async (args) => {
         if (scanFailed) return { contents: "", loader: "js" };
         const path = fileReplacements[args.path] ?? args.path;
-        let code = await readFile(path, "utf8");
+        const code = await readFile(path, "utf8");
+        const output = await TransformChain.run(code, path, transforms);
+        if (!output) return { contents: code, loader: "js" };
 
-        for (const transform of transforms) {
-          const result = await transform.transform(code, path);
-          if (result !== undefined) code = result;
-        }
-
-        return { contents: code, loader: "js" };
+        // Como Angular CLI: el mapa va inline en lo que recibe esbuild, que lo junta con el del bundle (`sourcemap`).
+        const contents = build.initialOptions.sourcemap && output.map ? TransformChain.inline(output.code, output.map) : output.code;
+        return { contents, loader: "js" };
       });
     },
   };

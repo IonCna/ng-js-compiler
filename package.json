@@ -34,7 +34,9 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@swc/core": "^1.16.2"
+    "@ampproject/remapping": "^2.3.0",
+    "@swc/core": "^1.16.2",
+    "magic-string": "^1.4.2"
   },
   "peerDependencies": {
     "angular": "1.8.3",
@@ -50,6 +52,7 @@
     }
   },
   "devDependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31",
     "@types/angular": "^1.8.9",
     "@types/bun": "latest",
     "@types/jsdom": "^30.0.0",

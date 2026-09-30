@@ -1,6 +1,7 @@
 import { PlatformCode, type ProjectType } from "@/compiler/platform-code.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { AsyncDownlevel } from "@/compiler/async-downlevel.ts";
+import { TransformChain } from "@/compiler/transform-chain.ts";
 import { ProjectScan } from "@/vite/project-scan.ts";
 import type { Plugin } from "vite";
 
@@ -58,13 +59,8 @@ export function viteTransformPlugin(
       if (projectType === "application" && AsyncDownlevel.isDependency(id)) return AsyncDownlevel.dependency(code, id);
       if (!id.endsWith(".ts")) return;
 
-      let result = code;
-      for (const transform of await scan.ready()) {
-        const next = await transform.transform(result, id);
-        if (next !== undefined) result = next;
-      }
-
-      return result === code ? undefined : { code: result, map: null };
+      const output = await TransformChain.run(code, id, await scan.ready());
+      return output && { code: output.code, map: output.map };
     },
   };
 }

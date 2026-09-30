@@ -4,6 +4,7 @@ import { ApplicationNode } from "@/compiler/application-node.ts";
 import { DecoratorReader } from "@/compiler/decorator-reader.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
+import { TransformChain } from "@/compiler/transform-chain.ts";
 import type { ModuleImport, NgModuleMetadata, ProviderMetadata } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
@@ -30,12 +31,23 @@ export interface ScanOptions {
  */
 export class ApplicationScanner {
   private readonly nodes = new Map<string, ApplicationNode>();
+  /** La metadata de esta compilación — el escaneo y la emisión (`createNgjsCompilerTransforms`) corren contra ella. */
+  readonly metadata = MetadataStore.scope();
+
+  /** Corre `fn` contra la metadata de esta compilación (ver `MetadataStore.within`). */
+  within<T>(fn: () => T): T {
+    return MetadataStore.within(this.metadata, fn);
+  }
 
   /**
    * Pasada 1 (lee todo) + pasada 2 (resuelve `declarations`/`imports` a nodos reales). Varias raíces se escanean
    * como un solo proyecto (ej. una app y el código fuente de una librería que compila junto con ella).
    */
-  async scan(sourceRoot: string | string[], options: ScanOptions = {}): Promise<void> {
+  scan(sourceRoot: string | string[], options: ScanOptions = {}): Promise<void> {
+    return this.within(() => this.scanInScope(sourceRoot, options));
+  }
+
+  private async scanInScope(sourceRoot: string | string[], options: ScanOptions): Promise<void> {
     const roots = Array.isArray(sourceRoot) ? sourceRoot : [sourceRoot];
     const files = (await Promise.all(roots.map((root) => ApplicationScanner.listTsFiles(root)))).flat();
 
@@ -64,12 +76,8 @@ export class ApplicationScanner {
 
   /** El código que va a ver la emisión, con los transforms previos aplicados. */
   private static async readTransformed(path: string, options: ScanOptions): Promise<string> {
-    let code = await readFile(path, "utf8");
-    for (const transform of options.transforms ?? []) {
-      const result = await transform.transform(code, path);
-      if (result !== undefined) code = result;
-    }
-    return code;
+    const code = await readFile(path, "utf8");
+    return (await TransformChain.run(code, path, options.transforms ?? []))?.code ?? code;
   }
 
   /** Por nombre, como se ve desde `path`: primero una clase no exportada de ese archivo, después una exportada. */

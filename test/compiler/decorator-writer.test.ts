@@ -179,7 +179,7 @@ describe("DecoratorWriter", () => {
       outputs: { closed: "closed" },
       exportAs: ["card"],
       // Lo de `.component()` (sin `controller`): para registrarlo al vuelo, fuera de un `@NgModule`.
-      definition: { templateUrl: "./card.html", bindings: { title: "<?", alias: "<?aka", closed: "&?" } },
+      definition: { templateUrl: "./card.html", bindings: { title: "<?ngTitle", alias: "<?aka", closed: "&?" } },
     });
     expect(CardComponent.ɵfac.ɵproviders).toEqual([{ token: "SomeService_1a2b3c4d", kind: "class", ctor: expect.any(Function) }]);
     // La clase colgada del array de `$controller` (el `type` de Ivy).

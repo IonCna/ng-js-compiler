@@ -16,11 +16,13 @@ import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
  * responsabilidad de quien consuma este paquete.
  */
 export function createNgjsCompilerTransforms(scanner: ApplicationScanner): NgjsTransform[] {
-  return [
+  const transforms = [
     decoratorReaderTransform,
     decoratorWriterTransform,
     injectionTokenWriterTransform,
     createModuleWriterTransform(scanner),
     decoratorMetadataTransform,
   ];
+  // Cada uno contra la metadata de ESTA compilación (la del escaneo), no la de otra que corra en el mismo proceso.
+  return transforms.map((step) => ({ transform: (code, path) => scanner.within(() => step.transform(code, path)) }));
 }

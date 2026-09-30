@@ -5,7 +5,8 @@ import { type BindingDef, ComponentBindings } from "@/compiler/component-binding
 import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HashId } from "@/compiler/hash-id.ts";
-import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { CodeEdit } from "@/compiler/code-edit.ts";
+import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
 import { ModuleWithProvidersRuntime } from "@/compiler/module-with-providers-runtime.ts";
 import { MultiProvidersRuntime } from "@/compiler/multi-providers-runtime.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
@@ -40,7 +41,17 @@ const ANGULAR = "ɵangular";
 export class ModuleWriter {
   constructor(private readonly scanner: ApplicationScanner) {}
 
+  /** Contra la metadata del escaneo de `scanner` — la misma compilación que resolvió el grafo. */
   write(code: string, path: string): string | undefined {
+    return this.writeWithMap(code, path)?.code;
+  }
+
+  /** `write()` con su source map: el `import`/runtimes van arriba y las registraciones abajo — el código se corre. */
+  writeWithMap(code: string, path: string): TransformOutput | undefined {
+    return this.scanner.within(() => this.writeInScope(code, path));
+  }
+
+  private writeInScope(code: string, path: string): TransformOutput | undefined {
     const modules = MetadataStore.get(path).filter((metadata) => metadata.kind === "ngmodule");
     if (!modules.length) return undefined;
 
@@ -73,7 +84,10 @@ export class ModuleWriter {
     ]
       .map((source) => `${source}\n`)
       .join("");
-    return `import ${ANGULAR} from "angular";\n${prelude}${code}\n${statements.join("\n")}\n`;
+    return CodeEdit.from(code, path)
+      .prepend(`import ${ANGULAR} from "angular";\n${prelude}`)
+      .append(`\n${statements.join("\n")}\n`)
+      .output();
   }
 
   /** Declara algún `@Component`/`@Directive` con `providers` propios — ese módulo trae su injector por elemento. */
@@ -334,5 +348,5 @@ export class ModuleWriter {
 
 export function createModuleWriterTransform(scanner: ApplicationScanner): NgjsTransform {
   const writer = new ModuleWriter(scanner);
-  return { transform: (code, path) => Promise.resolve(writer.write(code, path)) };
+  return { transform: (code, path) => Promise.resolve(writer.writeWithMap(code, path)) };
 }

@@ -320,7 +320,7 @@ ${withModule ? "\n@NgModule({ declarations: [TestComponent] })\nexport class Loc
     expect(scanner.get("TestComponent")).toBeUndefined();
     expect(scanner.get("LocalModule")?.declarations.components).toEqual([a]);
 
-    const token = (path: string) => (MetadataStore.get(path)[0] as { token?: string }).token;
+    const token = (path: string, from = scanner) => from.within(() => (MetadataStore.get(path)[0] as { token?: string }).token);
     expect(token(join(dir, "a.spec.ts"))).toBeUndefined();
 
     // Un @Injectable local también: dos con el mismo nombre no comparten nombre de DI.
@@ -332,12 +332,42 @@ class Helper {}
     await mkdir(join(dir, "x"), { recursive: true });
     await writeFile(join(dir, "x", "one.ts"), service, "utf8");
     await writeFile(join(dir, "x", "two.ts"), service, "utf8");
-    MetadataStore.clear();
-    await new ApplicationScanner().scan(dir);
-    const one = token(join(dir, "x", "one.ts"));
-    const two = token(join(dir, "x", "two.ts"));
+    const rescan = new ApplicationScanner();
+    await rescan.scan(dir);
+    const one = token(join(dir, "x", "one.ts"), rescan);
+    const two = token(join(dir, "x", "two.ts"), rescan);
     expect(one).toMatch(/^Helper_/);
     expect(two).toMatch(/^Helper_/);
     expect(one).not.toBe(two);
+  });
+
+  it("cada escaneo tiene su propia metadata: un archivo borrado o sin decoradores no sobrevive al siguiente", async () => {
+    const card = join(dir, "card.component.ts");
+    const pipe = join(dir, "upper.pipe.ts");
+    await writeFile(card, `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-card", template: "" })
+export class CardComponent {}
+`, "utf8");
+    await writeFile(pipe, `import { Pipe } from "ngjs-core";
+
+@Pipe({ name: "upper" })
+export class UpperPipe {}
+`, "utf8");
+
+    const first = new ApplicationScanner();
+    await first.scan(dir);
+
+    // Se le saca el decorador a uno y se borra el otro — como en el dev-server entre dos escaneos.
+    await writeFile(card, "export class CardComponent {}\n", "utf8");
+    await rm(pipe);
+    const second = new ApplicationScanner();
+    await second.scan(dir);
+
+    expect(second.within(() => MetadataStore.get(card))).toEqual([]);
+    expect(second.within(() => MetadataStore.get(pipe))).toEqual([]);
+    expect(second.within(() => MetadataStore.findClass("CardComponent"))).toBeUndefined();
+    // El escaneo anterior no se toca (una compilación en paralelo sigue viendo lo suyo).
+    expect(first.within(() => MetadataStore.findClass("UpperPipe"))?.kind).toBe("pipe");
   });
 });

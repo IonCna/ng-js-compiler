@@ -2,7 +2,8 @@ import { parse } from "@swc/core";
 import type { Expression, ModuleItem, ObjectExpression, VariableDeclaration } from "@swc/core";
 import { DecoratorReader } from "@/compiler/decorator-reader.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
-import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { CodeEdit } from "@/compiler/code-edit.ts";
+import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
 import { PlatformCode } from "@/compiler/platform-code.ts";
 import { TokenName } from "@/compiler/token-name.ts";
 
@@ -20,6 +21,11 @@ import { TokenName } from "@/compiler/token-name.ts";
  */
 export class InjectionTokenWriter {
   static async write(code: string, path: string): Promise<string | undefined> {
+    return (await InjectionTokenWriter.writeWithMap(code, path))?.code;
+  }
+
+  /** `write()` con su source map: el `ɵprov` va al final, el código original no se mueve. */
+  static async writeWithMap(code: string, path: string): Promise<TransformOutput | undefined> {
     if (!/new\s+InjectionToken\b/.test(code)) return undefined;
 
     const ast = await parse(code, { syntax: "typescript", decorators: true, target: "es2022" });
@@ -37,7 +43,7 @@ export class InjectionTokenWriter {
       return `${name}.ɵprov = { token: ${JSON.stringify(token)}, providedIn: "root", factory: ${array} };\n${PlatformCode.rootProviderStatement(token, `${name}.ɵprov.factory`)}`;
     });
 
-    return `${code}\n${statements.join("\n")}\n`;
+    return CodeEdit.append(code, path, `\n${statements.join("\n")}\n`);
   }
 
   /** `{ providedIn?, factory }` → el `factory`; sin opciones o sin `factory`, `undefined` (solo el nombre). */
@@ -74,5 +80,5 @@ export class InjectionTokenWriter {
 }
 
 export const injectionTokenWriterTransform: NgjsTransform = {
-  transform: (code, path) => InjectionTokenWriter.write(code, path),
+  transform: (code, path) => InjectionTokenWriter.writeWithMap(code, path),
 };

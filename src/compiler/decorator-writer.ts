@@ -5,7 +5,8 @@ import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HostWiring } from "@/compiler/host-wiring.ts";
 import { InjectedValues } from "@/compiler/injected-values.ts";
 import { LifecycleWiring } from "@/compiler/lifecycle-wiring.ts";
-import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import { CodeEdit } from "@/compiler/code-edit.ts";
+import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import { PlatformCode } from "@/compiler/platform-code.ts";
 import { ScopedProviders } from "@/compiler/scoped-providers.ts";
@@ -45,10 +46,15 @@ type WritableMetadata = DecoratorMetadata;
  */
 export class DecoratorWriter {
   static write(code: string, path: string): string | undefined {
+    return DecoratorWriter.writeWithMap(code, path)?.code;
+  }
+
+  /** `write()` con su source map: lo generado va al final, el código original no se mueve. */
+  static writeWithMap(code: string, path: string): TransformOutput | undefined {
     const statements = MetadataStore.get(path).flatMap((metadata) => DecoratorWriter.statementsFor(metadata));
     // Una directiva/componente inyectada se lee del elemento con este helper (`ElementInstances`), uno por archivo.
     if (statements.some((statement) => statement.includes("ɵelementInstance("))) statements.push(ElementInstances.helperSource());
-    return statements.length ? `${code}\n${statements.join("\n")}\n` : undefined;
+    return statements.length ? CodeEdit.append(code, path, `\n${statements.join("\n")}\n`) : undefined;
   }
 
   private static statementsFor(declared: WritableMetadata): string[] {
@@ -306,5 +312,5 @@ export class DecoratorWriter {
 }
 
 export const decoratorWriterTransform: NgjsTransform = {
-  transform: (code, path) => Promise.resolve(DecoratorWriter.write(code, path)),
+  transform: (code, path) => Promise.resolve(DecoratorWriter.writeWithMap(code, path)),
 };

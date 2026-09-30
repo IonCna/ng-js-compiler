@@ -1,6 +1,6 @@
 import { transform } from "@swc/core";
 import { AsyncDownlevel } from "@/compiler/async-downlevel.ts";
-import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
+import type { NgjsTransform, TransformSourceMap } from "@/compiler/ngjs-transform.ts";
 
 /**
  * Último paso de la cadena: SWC pasa TS → JS y transforma los decoradores que
@@ -17,8 +17,12 @@ import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
  */
 export const decoratorMetadataTransform: NgjsTransform = {
   async transform(code, path) {
-    const { code: output } = await transform(code, {
+    const { code: output, map } = await transform(code, {
       filename: path,
+      // Su mapa (JS → lo que recibió) lo junta `TransformChain` con el de los pasos anteriores.
+      sourceMaps: true,
+      sourceFileName: path,
+      inputSourceMap: false,
       env: AsyncDownlevel.SWC_ENV,
       jsc: {
         parser: { syntax: "typescript", decorators: true },
@@ -29,6 +33,6 @@ export const decoratorMetadataTransform: NgjsTransform = {
       module: { type: "es6" },
     });
 
-    return output;
+    return { code: output, map: map ? (JSON.parse(map) as TransformSourceMap) : null };
   },
 };

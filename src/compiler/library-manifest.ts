@@ -31,7 +31,8 @@ export class LibraryManifest {
 
   static from(scanner: ApplicationScanner): NgjsManifest {
     const metadata = [...scanner.allNodes()].map((node) => node.metadata);
-    return LibraryManifest.build(metadata, (className, from) => MetadataStore.findClass(className, from));
+    // Contra la metadata de ese escaneo (corre después, desde `onScanned`, fuera de su scope).
+    return scanner.within(() => LibraryManifest.build(metadata, (className, from) => MetadataStore.findClass(className, from)));
   }
 
   /**
