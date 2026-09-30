@@ -4,6 +4,7 @@ import { ElementInstances, HOST_DATA_KEY } from "@/compiler/element-instances.ts
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HostWiring } from "@/compiler/host-wiring.ts";
 import { InjectedValues } from "@/compiler/injected-values.ts";
+import { InputTransforms } from "@/compiler/input-transforms.ts";
 import { LifecycleWiring } from "@/compiler/lifecycle-wiring.ts";
 import { CodeEdit } from "@/compiler/code-edit.ts";
 import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
@@ -54,6 +55,9 @@ export class DecoratorWriter {
     const statements = MetadataStore.get(path).flatMap((metadata) => DecoratorWriter.statementsFor(metadata));
     // Una directiva/componente inyectada se lee del elemento con este helper (`ElementInstances`), uno por archivo.
     if (statements.some((statement) => statement.includes("ɵelementInstance("))) statements.push(ElementInstances.helperSource());
+    if (statements.some((statement) => statement.includes("ɵtransformInput(") || statement.includes("ɵinputTransform("))) {
+      statements.push(InputTransforms.helperSource());
+    }
     return statements.length ? CodeEdit.append(code, path, `\n${statements.join("\n")}\n`) : undefined;
   }
 
@@ -83,6 +87,12 @@ export class DecoratorWriter {
         break;
       default:
         statements.push(DecoratorWriter.provStatement(metadata));
+    }
+
+    if (declared.kind === "component" || declared.kind === "directive") {
+      // Solo los `transform` que declara esta clase (en su archivo); los heredados se buscan en su base.
+      const transforms = InputTransforms.declarationStatement(declared.className, declared.inputs);
+      if (transforms) statements.push(transforms);
     }
 
     if (metadata.kind === "component" || metadata.kind === "directive") {
@@ -159,11 +169,13 @@ export class DecoratorWriter {
     }
 
     const guard = DecoratorWriter.tagGuardStatement(metadata);
+    const attributes = HostWiring.attributeStatements(metadata);
+    const transforms = InputTransforms.wiringStatements(className, metadata.inputs);
     const wiring = HostWiring.hasAny(metadata) ? HostWiring.statements(metadata, className) : [];
     const factoryParams = [params, ...HostWiring.FACTORY_DEPS].filter((param) => param.length > 0).join(", ");
     // Un componente marca su elemento como límite de `@Host` para lo que se construya adentro (`HOST_DATA_KEY`).
     const hostMark = metadata.kind === "component" ? `$element.data(${JSON.stringify(HOST_DATA_KEY)}, $element[0]);` : "";
-    const body = [guard, hostMark, construct("var instance = "), ...wiring, "return instance;"].filter(Boolean).join(" ");
+    const body = [guard, hostMark, ...attributes, construct("var instance = "), ...transforms, ...wiring, "return instance;"].filter(Boolean).join(" ");
     const allDeps = [...deps, ...HostWiring.FACTORY_DEPS.map((dep) => JSON.stringify(dep))];
 
     return `${className}.ɵfac = [${[...allDeps, `function ${className}_Factory(${factoryParams}) { ${body} }`].join(", ")}];`;

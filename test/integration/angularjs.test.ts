@@ -1140,6 +1140,154 @@ export class AppModule {}
     expect(controller.clicks).toBe(1);
   });
 
+  it("host: {} del decorador: atributos estáticos (class/style se suman), [bindings] con expresión y (listeners) con $event", async () => {
+    await write(
+      "toggle.component.ts",
+      `import { Component } from "ngjs-core";
+
+@Component({
+  selector: "app-toggle",
+  template: "",
+  host: {
+    role: "button",
+    class: "btn",
+    style: "display: block",
+    title: "desde host",
+    "[class.active]": "open && !disabled",
+    "[attr.aria-pressed]": "this.open",
+    "(click)": "toggle($event.type); clicks = clicks + 1",
+    "(document:keydown.escape)": "open = false",
+  },
+})
+export class ToggleComponent {
+  open = false;
+  disabled = false;
+  clicks = 0;
+  last = "";
+  toggle(type: string): void { this.open = !this.open; this.last = type; }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { ToggleComponent } from "./toggle.component";
+
+@NgModule({ declarations: [ToggleComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular } = await bootstrap(`<app-toggle class="own" title="propio"></app-toggle>`);
+    const el = dom.window.document.querySelector("app-toggle")! as HTMLElement;
+    const controller = angular.element(el).controller("appToggle") as { clicks: number; open: boolean; last: string; disabled: boolean };
+
+    expect(el.getAttribute("role")).toBe("button");
+    expect(el.className).toContain("own");
+    expect(el.classList.contains("btn")).toBe(true);
+    expect(el.style.display).toBe("block");
+    // Un atributo que el template ya trae queda como está.
+    expect(el.getAttribute("title")).toBe("propio");
+    expect(el.getAttribute("aria-pressed")).toBe("false");
+    expect(el.classList.contains("active")).toBe(false);
+
+    el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    expect(controller.clicks).toBe(1);
+    expect(controller.last).toBe("click");
+    expect(el.classList.contains("active")).toBe(true);
+    expect(el.getAttribute("aria-pressed")).toBe("true");
+
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape" }));
+    expect(controller.open).toBe(false);
+    expect(el.classList.contains("active")).toBe(false);
+  });
+
+  it("inputs/outputs del decorador y @Input({ transform, required }): el binding llega transformado (también heredado de otro archivo y en ngOnChanges)", async () => {
+    await write(
+      "transforms.ts",
+      `export function toBoolean(value: unknown): boolean { return value != null && \`\${value}\` !== "false"; }
+`,
+    );
+    await write(
+      "base.directive.ts",
+      `import { Directive, Input } from "ngjs-core";
+import { toBoolean } from "./transforms";
+
+@Directive()
+export abstract class BaseDirective {
+  @Input({ transform: toBoolean, required: true }) disabledState = false;
+}
+`,
+    );
+    await write(
+      "card.component.ts",
+      `import { Component, Input } from "ngjs-core";
+import { BaseDirective } from "./base.directive";
+
+@Component({
+  selector: "app-card",
+  template: "",
+  inputs: ["title: heading", { name: "size", transform: (value: string) => Number(value) * 2 }],
+  outputs: ["picked"],
+})
+export class CardComponent extends BaseDirective {
+  title = "";
+  size = 1;
+  seen: string[] = [];
+  private _level = 0;
+  @Input({ transform: (value: string) => Number(value) })
+  set level(value: number) { this._level = value + 1; }
+  get level(): number { return this._level; }
+
+  ngOnChanges(changes: any): void {
+    for (const key of Object.keys(changes).sort()) this.seen.push(key + "=" + JSON.stringify(changes[key].currentValue));
+  }
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { CardComponent } from "./card.component";
+
+@NgModule({ declarations: [CardComponent] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const { dom, angular, injector } = await bootstrap(
+      `<app-card heading="'Hola'" size="size" level="'4'" disabled-state="flag"></app-card>`,
+    );
+    const el = dom.window.document.querySelector("app-card")!;
+    const controller = angular.element(el).controller("appCard") as {
+      title: string;
+      size: number;
+      level: number;
+      disabledState: boolean;
+      seen: string[];
+      constructor: { ɵcmp: { inputs: Record<string, string>; outputs: Record<string, string> } };
+    };
+    const $rootScope = injector.get<{ $digest(): void; size?: string; flag?: string }>("$rootScope");
+
+    $rootScope.size = "5";
+    $rootScope.flag = "";
+    $rootScope.$digest();
+
+    expect(controller.title).toBe("Hola");
+    expect(controller.size).toBe(10);
+    // Con accessor propio, el setter recibe el valor ya transformado.
+    expect(controller.level).toBe(5);
+    // Heredado de la base (otro archivo): "" (atributo presente) → true.
+    expect(controller.disabledState).toBe(true);
+    expect(controller.seen).toContain("size=10");
+    expect(controller.seen).toContain("disabledState=true");
+
+    expect(controller.constructor.ɵcmp.inputs).toMatchObject({ heading: "title", size: "size", level: "level", disabledState: "disabledState" });
+    expect(controller.constructor.ɵcmp.outputs).toEqual({ picked: "picked" });
+  });
+
   it("@HostBinding de un hijo ya aplicado cuando corre el ngAfterViewInit del padre (después de $onInit, sin esperar al digest)", async () => {
     await write(
       "spy.directive.ts",

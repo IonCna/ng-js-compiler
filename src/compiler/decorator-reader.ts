@@ -7,6 +7,7 @@ import type {
   ClassMember,
   Decorator,
   Expression,
+  ExprOrSpread,
   ModuleItem,
   NumericLiteral,
   ObjectExpression,
@@ -20,6 +21,7 @@ import type {
 } from "@swc/core";
 import { TokenName } from "@/compiler/token-name.ts";
 import { CodeEdit } from "@/compiler/code-edit.ts";
+import { HostExpression } from "@/compiler/host-expression.ts";
 import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
 import { InjectedValues } from "@/compiler/injected-values.ts";
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
@@ -306,7 +308,7 @@ export class DecoratorReader {
           className,
           options,
           ...construction,
-          ...DecoratorReader.readBindings(cls.body, stripSpans, className, context),
+          ...DecoratorReader.withOptionBindings(DecoratorReader.readBindings(cls.body, stripSpans, className, context), objExpr, className, context),
           hostDirectives: DecoratorReader.readHostDirectives(objExpr, className, context),
           providers: DecoratorReader.readProviders(objExpr, className, context),
         };
@@ -657,7 +659,7 @@ export class DecoratorReader {
             stripSpans.push(decorator.span);
             continue;
           }
-          if (DecoratorReader.readPropertyBinding(decorator, bindings, name, owner)) stripSpans.push(decorator.span);
+          if (DecoratorReader.readPropertyBinding(decorator, bindings, name, owner, context)) stripSpans.push(decorator.span);
         }
       }
 
@@ -679,7 +681,7 @@ export class DecoratorReader {
           // `@Input() format(x) {...}` (un método): como en Angular, el binding pisa el método por defecto.
           const accessor = member.kind === "getter" || member.kind === "setter";
           const methodInput = member.kind === "method" && DecoratorReader.decoratorCallName(decorator) === "Input";
-          if ((accessor || methodInput) && DecoratorReader.readPropertyBinding(decorator, bindings, name, owner)) {
+          if ((accessor || methodInput) && DecoratorReader.readPropertyBinding(decorator, bindings, name, owner, context)) {
             stripSpans.push(decorator.span);
             continue;
           }
@@ -700,11 +702,11 @@ export class DecoratorReader {
 
   /**
    * `@Input`/`@Output`/`@HostBinding` sobre `name` (campo o accessor). `false` si el decorador no es ninguno de los
-   * tres. `@Input`/`@Output` aceptan el alias como string o como objeto (`{ alias, required, binding }`), como en
-   * Angular; `binding: "@"` es el binding de interpolación de AngularJS. `transform` no se puede aplicar en build
-   * (es una función): error, no se ignora.
+   * tres. `@Input`/`@Output` aceptan el alias como string o como objeto (`{ alias, required, transform, binding }`),
+   * como en Angular; `binding: "@"` es el binding de interpolación de AngularJS. `transform` es una expresión (una
+   * función importada o literal): se guarda su texto y la estampa `InputTransforms`.
    */
-  private static readPropertyBinding(decorator: Decorator, bindings: ClassBindings, name: string, owner: string): boolean {
+  private static readPropertyBinding(decorator: Decorator, bindings: ClassBindings, name: string, owner: string, context: FileContext): boolean {
     const decoratorName = DecoratorReader.decoratorCallName(decorator);
     const handler = decoratorName ? DecoratorReader.PROPERTY_BINDING_HANDLERS[decoratorName] : undefined;
     if (!handler) return false;
@@ -723,14 +725,107 @@ export class DecoratorReader {
     const options = first as Record<string, unknown>;
     const allowed = decoratorName === "Input" ? ["alias", "required", "binding", "transform"] : ["alias"];
     for (const key of Object.keys(options)) if (!allowed.includes(key)) fail(`opción "${key}" desconocida.`);
-    if ("transform" in options) fail("`transform` no está soportado (una función no se puede aplicar en build) — transformá el valor en un setter.");
     if (options.alias !== undefined && typeof options.alias !== "string") fail("`alias` tiene que ser un string literal.");
     if (options.required !== undefined && typeof options.required !== "boolean") fail("`required` tiene que ser true/false literal.");
     if (options.binding !== undefined && options.binding !== "<" && options.binding !== "@") fail('`binding` tiene que ser "<" o "@".');
 
     handler(bindings, name, (options.alias as string | undefined) ?? name);
-    if (options.binding === "@") bindings.inputs[bindings.inputs.length - 1]!.mode = "@";
+    if (decoratorName !== "Input") return true;
+    const input = bindings.inputs[bindings.inputs.length - 1]!;
+    if (options.binding === "@") input.mode = "@";
+    if (options.required === true) input.required = true;
+    const transform = DecoratorReader.propValue(DecoratorReader.decoratorFirstArgExpression(decorator) as ObjectExpression, "transform");
+    if (transform) input.transformExpr = DecoratorReader.transformSource(transform, context, fail);
     return true;
+  }
+
+  /** `transform: booleanAttribute` / `transform: (v: string) => ...`: el texto fuente (se evalúa en el archivo que lo declara). */
+  private static transformSource(expr: Expression, context: FileContext, fail: (reason: string) => never): string {
+    const allowed = ["Identifier", "MemberExpression", "ArrowFunctionExpression", "FunctionExpression", "CallExpression"];
+    if (!allowed.includes(expr.type)) return fail("`transform` tiene que ser una función (una referencia o una arrow).");
+    return DecoratorReader.source(expr, context);
+  }
+
+  /**
+   * `inputs`/`outputs`/`host`/`queries` del objeto del decorador, como Angular: lo mismo que `@Input`/`@Output`/
+   * `@HostBinding`/`@HostListener`/`@ViewChild` sobre los miembros, sumado a lo que ya se leyó de ellos. Una forma que
+   * no se puede leer en build es error.
+   */
+  private static withOptionBindings(bindings: ClassBindings, objExpr: ObjectExpression | undefined, owner: string, context: FileContext): ClassBindings {
+    const fail = (key: string, reason: string): never => {
+      throw new Error(`DecoratorReader: "${owner}" — \`${key}\`: ${reason}`);
+    };
+    const arrayOf = (key: string): Expression[] | undefined => {
+      const value = DecoratorReader.propValue(objExpr, key);
+      if (!value) return undefined;
+      if (value.type !== "ArrayExpression") return fail(key, "tiene que ser un array literal.");
+      return value.elements.map((element) => (!element || element.spread ? fail(key, "no admite huecos ni `...spread`.") : element.expression));
+    };
+    // `"propiedad"` o `"propiedad: alias"`.
+    const nameAndAlias = (key: string, text: string): { propName: string; bindingName: string } => {
+      const [propName, alias, ...rest] = text.split(":").map((part) => part.trim());
+      if (!propName || rest.length || alias === "") return fail(key, `${JSON.stringify(text)} no es "propiedad" ni "propiedad: alias".`);
+      return { propName, bindingName: alias ?? propName };
+    };
+
+    for (const element of arrayOf("inputs") ?? []) {
+      if (element.type === "StringLiteral") {
+        bindings.inputs.push(nameAndAlias("inputs", element.value));
+        continue;
+      }
+      if (element.type !== "ObjectExpression") fail("inputs", "cada input es un string literal o `{ name, alias, required, transform }`.");
+      const options = DecoratorReader.objectLiteralValue(element as ObjectExpression);
+      for (const key of Object.keys(options)) if (!["name", "alias", "required", "transform"].includes(key)) fail("inputs", `opción "${key}" desconocida.`);
+      if (typeof options.name !== "string") fail("inputs", "`name` tiene que ser un string literal.");
+      if (options.alias !== undefined && typeof options.alias !== "string") fail("inputs", "`alias` tiene que ser un string literal.");
+      if (options.required !== undefined && typeof options.required !== "boolean") fail("inputs", "`required` tiene que ser true/false literal.");
+      const input: ClassBindings["inputs"][number] = { propName: options.name as string, bindingName: (options.alias as string | undefined) ?? (options.name as string) };
+      if (options.required === true) input.required = true;
+      const transform = DecoratorReader.propValue(element as ObjectExpression, "transform");
+      if (transform) input.transformExpr = DecoratorReader.transformSource(transform, context, (reason) => fail("inputs", reason));
+      bindings.inputs.push(input);
+    }
+
+    for (const element of arrayOf("outputs") ?? []) {
+      if (element.type !== "StringLiteral") fail("outputs", "cada output es un string literal.");
+      bindings.outputs.push(nameAndAlias("outputs", (element as StringLiteral).value));
+    }
+
+    const host = DecoratorReader.propValue(objExpr, "host");
+    if (host) {
+      if (host.type !== "ObjectExpression") fail("host", "tiene que ser un objeto literal.");
+      for (const prop of (host as ObjectExpression).properties) {
+        const key = prop.type === "KeyValueProperty" ? DecoratorReader.propName(prop.key) : undefined;
+        if (prop.type !== "KeyValueProperty" || key === undefined) return fail("host", "solo admite propiedades `\"clave\": \"valor\"`.");
+        const value = DecoratorReader.literalValue(prop.value);
+        if (typeof value !== "string") return fail("host", `el valor de ${JSON.stringify(key)} tiene que ser un string literal.`);
+        const where = `"${owner}" host[${JSON.stringify(key)}]`;
+        const binding = /^\[(.+)\]$/.exec(key);
+        const listener = /^\((.+)\)$/.exec(key);
+        if (binding) {
+          bindings.hostBindings.push({ propName: `host[${JSON.stringify(key)}]`, hostProperty: binding[1]!.trim(), expr: HostExpression.binding(value, where) });
+        } else if (listener) {
+          bindings.hostListeners.push({ methodName: "", eventName: listener[1]!.trim(), args: [], handler: HostExpression.listener(value, where) });
+        } else {
+          bindings.hostAttributes = { ...bindings.hostAttributes, [key]: value };
+        }
+      }
+    }
+
+    const queries = DecoratorReader.propValue(objExpr, "queries");
+    if (queries) {
+      if (queries.type !== "ObjectExpression") fail("queries", "tiene que ser un objeto literal.");
+      for (const prop of (queries as ObjectExpression).properties) {
+        const key = prop.type === "KeyValueProperty" ? DecoratorReader.propName(prop.key) : undefined;
+        if (prop.type !== "KeyValueProperty" || key === undefined) return fail("queries", "solo admite propiedades `propiedad: new ViewChild(...)`.");
+        const value = prop.value;
+        const name = value.type === "NewExpression" && value.callee.type === "Identifier" ? value.callee.value : undefined;
+        const query = name && value.type === "NewExpression" ? DecoratorReader.queryFromCall(name, value.arguments ?? [], key, owner, context) : undefined;
+        if (!query) return fail("queries", `${JSON.stringify(key)} tiene que ser \`new ViewChild(...)\`/\`ViewChildren\`/\`ContentChild\`/\`ContentChildren\`.`);
+        bindings.queries.push(query);
+      }
+    }
+    return bindings;
   }
 
   /**
@@ -740,15 +835,21 @@ export class DecoratorReader {
    */
   private static queryOf(decorator: Decorator, propertyName: string, owner: string, context: FileContext): QueryMetadata | undefined {
     const name = DecoratorReader.decoratorCallName(decorator);
-    const spec = name ? QUERY_DECORATORS[name] : undefined;
+    if (!name || !QUERY_DECORATORS[name]) return undefined;
+    const call = decorator.expression;
+    return DecoratorReader.queryFromCall(name, call.type === "CallExpression" ? call.arguments : [], propertyName, owner, context);
+  }
+
+  /** `@ViewChild(...)` sobre un miembro o `new ViewChild(...)` en `queries` — mismos argumentos. */
+  private static queryFromCall(name: string, args: ExprOrSpread[], propertyName: string, owner: string, context: FileContext): QueryMetadata | undefined {
+    const spec = QUERY_DECORATORS[name];
     if (!spec) return undefined;
     const fail = (reason: string): never => {
       throw new Error(`DecoratorReader: "${owner}.${propertyName}" — @${name}: ${reason}`);
     };
 
-    const call = decorator.expression;
-    if (call.type !== "CallExpression" || !call.arguments[0] || call.arguments[0].spread) return fail("falta el predicado (una clase o un nombre de #ref).");
-    const predicateExpr = DecoratorReader.unwrapForwardRef(call.arguments[0].expression, context);
+    if (!args[0] || args[0].spread) return fail("falta el predicado (una clase o un nombre de #ref).");
+    const predicateExpr = DecoratorReader.unwrapForwardRef(args[0].expression, context);
     const predicate: QueryMetadata["predicate"] =
       predicateExpr.type === "StringLiteral"
         ? { kind: "names", names: predicateExpr.value.split(",").map((ref) => ref.trim()).filter(Boolean) }
@@ -757,7 +858,7 @@ export class DecoratorReader {
           : fail("el predicado tiene que ser una clase o un string literal.");
 
     const query: QueryMetadata = { kind: spec.kind, propertyName, first: spec.first, predicate, descendants: spec.descendants, static: false };
-    const options = call.arguments[1]?.expression;
+    const options = args[1]?.expression;
     if (!options) return query;
     if (options.type !== "ObjectExpression") return fail("las opciones tienen que ser un objeto literal.");
     for (const prop of options.properties) {
