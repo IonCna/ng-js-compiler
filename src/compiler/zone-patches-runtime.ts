@@ -31,6 +31,13 @@
  *
  * Fuera de alcance: los handlers inline en el HTML (`<button onclick="...">`), que el navegador asigna sin pasar por
  * el setter.
+ *
+ * `fakeAsync` (de `ngjs-core/testing`), como el `FakeAsyncTestZoneSpec` de Zone.js: mientras existe
+ * `globalThis.ɵngjsFakeAsync`, los timers, `requestAnimationFrame` y `queueMicrotask` se le entregan a él (ya envueltos
+ * en su zona) en vez de al navegador, y `clearTimeout`/`clearInterval`/`cancelAnimationFrame` le preguntan primero si el
+ * id es suyo. Pasa por acá (y no por reemplazar los globales) porque `$browser` de AngularJS guarda `setTimeout` al
+ * crearse: un injector armado antes del `fakeAsync` igual queda en el reloj falso. La lógica de zona se expone en
+ * `globalThis.ɵngjsZone` para que las promesas falsas de `fakeAsync` corran igual que un `.then` de acá.
  */
 export class ZonePatchesRuntime {
   static source(): string {
@@ -68,12 +75,32 @@ export class ZonePatchesRuntime {
     }
   }
 
+  globalThis.ɵngjsZone = { inside: ɵinside, runIn: ɵrunIn };
+
+  // El reloj de \`fakeAsync\` (si hay uno activo) toma el trabajo ya envuelto en su zona.
+  function ɵschedule(kind, native, run, delay) {
+    var fake = globalThis.ɵngjsFakeAsync;
+    return fake ? fake.schedule(kind, run, delay) : native.call(window, run, delay);
+  }
+  function ɵpatchCancel(name) {
+    var native = window[name];
+    if (typeof native !== "function") return;
+    window[name] = function (id) {
+      var fake = globalThis.ɵngjsFakeAsync;
+      if (fake && fake.cancel(id)) return;
+      return native.apply(window, arguments);
+    };
+  }
+  ɵpatchCancel("clearTimeout");
+  ɵpatchCancel("clearInterval");
+  ɵpatchCancel("cancelAnimationFrame");
+
   var ɵsetTimeout = window.setTimeout;
   window.setTimeout = function (fn, delay) {
     if (typeof fn !== "function") return ɵsetTimeout.apply(window, arguments);
     var extra = Array.prototype.slice.call(arguments, 2);
     var inside = ɵinside();
-    return ɵsetTimeout.call(window, function () { ɵrunIn(inside, fn, null, extra); }, delay);
+    return ɵschedule("timeout", ɵsetTimeout, function () { ɵrunIn(inside, fn, null, extra); }, delay);
   };
 
   if (typeof window.requestAnimationFrame === "function") {
@@ -81,7 +108,7 @@ export class ZonePatchesRuntime {
     window.requestAnimationFrame = function (fn) {
       if (typeof fn !== "function") return ɵrequestAnimationFrame.apply(window, arguments);
       var inside = ɵinside();
-      return ɵrequestAnimationFrame.call(window, function (time) { ɵrunIn(inside, fn, null, [time]); });
+      return ɵschedule("animationFrame", ɵrequestAnimationFrame, function (time) { ɵrunIn(inside, fn, null, [time]); });
     };
   }
 
@@ -90,7 +117,9 @@ export class ZonePatchesRuntime {
     window.queueMicrotask = function (fn) {
       if (typeof fn !== "function") return ɵqueueMicrotask.apply(window, arguments);
       var inside = ɵinside();
-      return ɵqueueMicrotask.call(window, function () { ɵrunIn(inside, fn, null, []); });
+      var run = function () { ɵrunIn(inside, fn, null, []); };
+      var fake = globalThis.ɵngjsFakeAsync;
+      return fake ? fake.queueMicrotask(run) : ɵqueueMicrotask.call(window, run);
     };
   }
 
@@ -120,7 +149,7 @@ export class ZonePatchesRuntime {
     if (typeof fn !== "function") return ɵsetInterval.apply(window, arguments);
     var extra = Array.prototype.slice.call(arguments, 2);
     var inside = ɵinside();
-    return ɵsetInterval.call(window, function () { ɵrunIn(inside, fn, null, extra); }, delay);
+    return ɵschedule("interval", ɵsetInterval, function () { ɵrunIn(inside, fn, null, extra); }, delay);
   };
 
   // Los \`resolve\`/\`reject\` nativos de una promesa (sin nombre, sin \`prototype\`): los pasa el motor cuando una promesa

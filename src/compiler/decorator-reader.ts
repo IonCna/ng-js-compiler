@@ -180,6 +180,7 @@ export class DecoratorReader {
     const stripSpans: SourceEdit[] = [];
     for (const item of ast.body) {
       const cls = DecoratorReader.unwrapClassDeclaration(item);
+      if (cls) DecoratorReader.stripDecoratorTsWrappers(cls);
       const found = cls && DecoratorReader.readClassMetadata(cls, stripSpans, context);
       if (found) metadata.push(found);
       else if (cls) DecoratorReader.assertNoAngularFeatures(cls);
@@ -341,6 +342,47 @@ export class DecoratorReader {
         `DecoratorReader: "${cls.identifier.value}" usa @${used} pero no tiene decorador de clase — agregale @Directive()/@Injectable() (Angular también lo exige).`,
       );
     }
+  }
+
+  /** Envoltorios de TS que no cambian el valor: `x as T`, `x satisfies T`, `x as const`, `x!`, `<T>x`, `(x)`. */
+  private static readonly TS_WRAPPERS: ReadonlySet<string> = new Set([
+    "TsAsExpression",
+    "TsSatisfiesExpression",
+    "TsConstAssertion",
+    "TsNonNullExpression",
+    "TsTypeAssertion",
+    "ParenthesisExpression",
+  ]);
+
+  /**
+   * En los decoradores de la clase (de clase, de miembros y de parámetros del constructor), cada envoltorio de TS
+   * pasa a ser la expresión de adentro: `@Input({ alias: "x" } as InputOptions)`, `providers: [...] satisfies
+   * Provider[]` o `imports: [A] as const` se leen igual que sin él (antes se ignoraban sin avisar). Los spans de lo de
+   * adentro no cambian, así que lo que se copia o se saca del código sigue igual.
+   */
+  private static stripDecoratorTsWrappers(cls: ClassDeclaration): void {
+    const decorators = [
+      ...(cls.decorators ?? []),
+      ...cls.body.flatMap((member) => (member.type === "ClassProperty" ? (member.decorators ?? []) : member.type === "ClassMethod" ? (member.function.decorators ?? []) : [])),
+      ...cls.body.flatMap((member) => (member.type === "Constructor" ? member.params.flatMap((param) => ("decorators" in param ? (param.decorators ?? []) : [])) : [])),
+    ];
+    for (const decorator of decorators) decorator.expression = DecoratorReader.unwrapTs(decorator.expression) as Expression;
+  }
+
+  private static unwrapTs(node: unknown): unknown {
+    let current = node as { type?: string; expression?: unknown } | null;
+    while (current && typeof current === "object" && DecoratorReader.TS_WRAPPERS.has(current.type ?? "")) {
+      current = current.expression as typeof current;
+    }
+    if (!current || typeof current !== "object") return current;
+    const record = current as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      const value = record[key];
+      if (key === "span" || !value || typeof value !== "object") continue;
+      if (Array.isArray(value)) value.forEach((item, index) => (value[index] = DecoratorReader.unwrapTs(item)));
+      else record[key] = DecoratorReader.unwrapTs(value);
+    }
+    return current;
   }
 
   private static decoratorFirstArgExpression(decorator: Decorator): Expression | undefined {

@@ -3,6 +3,7 @@ import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { ElementInstances, HOST_DATA_KEY } from "@/compiler/element-instances.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HostWiring } from "@/compiler/host-wiring.ts";
+import { InheritedDefinition } from "@/compiler/inherited-definition.ts";
 import { InheritedFactory } from "@/compiler/inherited-factory.ts";
 import { InjectedValues } from "@/compiler/injected-values.ts";
 import { InputTransforms } from "@/compiler/input-transforms.ts";
@@ -12,7 +13,7 @@ import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.t
 import { ResolveDependency } from "@/compiler/resolve-dependency.ts";
 import { PlatformCode } from "@/compiler/platform-code.ts";
 import { ScopedProviders } from "@/compiler/scoped-providers.ts";
-import { SelectorParser } from "@/compiler/selector-parser.ts";
+import { type CompoundSelector, type ParsedSelector, SelectorParser } from "@/compiler/selector-parser.ts";
 import type {
   ComponentMetadata,
   DecoratorMetadata,
@@ -58,6 +59,8 @@ export class DecoratorWriter {
     if (statements.some((statement) => statement.includes("ɵelementInstance("))) statements.push(ElementInstances.helperSource());
     // El constructor heredado de una base de otro paquete se arma en runtime (`InheritedFactory`), uno por archivo.
     if (statements.some((statement) => statement.includes(`${InheritedFactory.NAME}(`))) statements.push(InheritedFactory.helperSource());
+    if (statements.some((statement) => statement.includes(`${InheritedDefinition.NAME}(`))) statements.push(InheritedDefinition.helperSource());
+    if (statements.some((statement) => statement.includes("ɵselectorAttr(") || statement.includes("ɵselectorClass("))) statements.push(DecoratorWriter.selectorHelperSource());
     if (statements.some((statement) => statement.includes("ɵtransformInput(") || statement.includes("ɵinputTransform("))) {
       statements.push(InputTransforms.helperSource());
     }
@@ -93,6 +96,9 @@ export class DecoratorWriter {
     }
 
     if (declared.kind === "component" || declared.kind === "directive") {
+      // La definición de una base de otro paquete se suma en runtime (`InheritedDefinition`), antes de registrarse.
+      const hops = ClassHierarchy.externalBaseHops(declared);
+      if (hops !== undefined) statements.push(InheritedDefinition.statement(declared.className, hops, declared.kind === "component" ? "ɵcmp" : "ɵdir"));
       // Solo los `transform` que declara esta clase (en su archivo); los heredados se buscan en su base.
       const transforms = InputTransforms.declarationStatement(declared.className, declared.inputs);
       if (transforms) statements.push(transforms);
@@ -203,37 +209,76 @@ export class DecoratorWriter {
    * (`[attr]` simple mezclado con una compuesta), no se puede armar ningún guard sin romper esa alternativa
    * sin restricción — nadie sabe, al construir, cuál nombre de la lista fue el que realmente matcheó.
    *
-   * Si `SelectorParser` no reconoce el selector (`attr=value` — sí lo entiende `ivySelectors` de
-   * `defStatement`, un parser aparte para el estampado Ivy) no es cosa de esta función decidir que está
-   * mal: sin guard, y que lo valide quien corresponda más adelante en el pipeline.
+   * Lo mismo con cualquier otra parte del selector que AngularJS no filtra al registrar (`[type=submit]`, otra clase,
+   * `:not(...)`): el guard es la lista entera (una alternativa u otra). Si todas las alternativas se registran con el
+   * mismo nombre, lo registrado no se vuelve a mirar (AngularJS ya lo garantizó — y en el comentario ancla de un
+   * `<ng-template>` no hay atributos que leer); si no, cada alternativa se mira entera. El caso común
+   * (`tag[atributo]`) conserva su guard y su aviso de tag.
    */
   private static tagGuardStatement(metadata: BindingsCarrier): string {
     const { selector } = metadata.options as { selector: string };
-    const requiredTags = DecoratorWriter.tryParseRequiredTags(selector);
-    if (!requiredTags) return "";
+    let alternatives: ParsedSelector[];
+    try {
+      alternatives = SelectorParser.parse(selector);
+    } catch {
+      return ""; // Lo valida quien registra (`ModuleWriter`).
+    }
+    const [first] = alternatives;
+    const shared = alternatives.every((parsed) => parsed.registrationName === first!.registrationName && parsed.restrict === first!.restrict);
+    const conditions = alternatives.map((parsed) => DecoratorWriter.conditionExpr(parsed.compound, shared ? parsed : undefined));
+    if (conditions.some((condition) => condition === "true")) return "";
 
-    const tags = JSON.stringify(requiredTags.map((tag) => tag.toLowerCase()));
-    const warning = JSON.stringify(`${metadata.className}: este selector requiere <${requiredTags.join("> o <")}>, no se aplica en <`);
     // Sobre `<ng-template>` la directiva queda en el comentario ancla de `ngTemplate` (transclusión de elemento):
     // ese nodo no tiene `tagName`, pero es el `<ng-template>`.
     const tag =
       '($element[0].nodeType === 8 && /ngTemplate/.test($element[0].nodeValue) ? "ng-template" : String($element[0].tagName || $element[0].nodeName).toLowerCase())';
     // Construyendo una subclase (`this.ɵT`, ver `InheritedFactory`) el selector que vale es el de ella, no este.
-    return `var ɵtag = ${tag}; if (!(this && this.ɵT) && ${tags}.indexOf(ɵtag) === -1) { console.warn(${warning} + ɵtag + ">."); return {}; }`;
+    const onlyTags = alternatives.every((parsed) => DecoratorWriter.conditionExpr(parsed.compound, shared ? parsed : undefined) === `ɵtag === ${JSON.stringify(parsed.compound.tag?.toLowerCase())}`);
+    if (shared && onlyTags) {
+      const requiredTags = [...new Set(alternatives.map((parsed) => parsed.compound.tag!))];
+      const tags = JSON.stringify(requiredTags.map((required) => required.toLowerCase()));
+      const warning = JSON.stringify(`${metadata.className}: este selector requiere <${requiredTags.join("> o <")}>, no se aplica en <`);
+      return `var ɵtag = ${tag}; if (!(this && this.ɵT) && ${tags}.indexOf(ɵtag) === -1) { console.warn(${warning} + ɵtag + ">."); return {}; }`;
+    }
+    const warning = JSON.stringify(`${metadata.className}: el elemento no cumple el selector ${JSON.stringify(selector)}, no se aplica en <`);
+    return `var ɵtag = ${tag}; if (!(this && this.ɵT) && !(${conditions.map((condition) => `(${condition})`).join(" || ")})) { console.warn(${warning} + ɵtag + ">."); return {}; }`;
   }
 
-  /** `undefined` = sin guard: selector no parseable acá, o alguna alternativa de la lista no exige tag. */
-  private static tryParseRequiredTags(selector: string): string[] | undefined {
-    let alternatives;
-    try {
-      alternatives = SelectorParser.parse(selector);
-    } catch {
-      return undefined;
+  /**
+   * La alternativa como expresión JS sobre `$element[0]` (`ɵtag` ya calculado; `ɵselectorAttr`/`ɵselectorClass` de
+   * `selectorHelperSource`). `registered`: lo que AngularJS ya garantizó al registrar, no se vuelve a mirar.
+   */
+  private static conditionExpr(compound: CompoundSelector, registered?: ParsedSelector): string {
+    const parts: string[] = [];
+    if (compound.tag && registered?.restrict !== "E") parts.push(`ɵtag === ${JSON.stringify(compound.tag.toLowerCase())}`);
+    for (const { name, value } of compound.attributes) {
+      const camel = SelectorParser.toCamelCase(name);
+      const read = `ɵselectorAttr($element[0], ${JSON.stringify(camel)})`;
+      if (value !== undefined) parts.push(`${read} === ${JSON.stringify(value)}`);
+      else if (!(registered?.restrict === "A" && registered.registrationName === camel)) parts.push(`${read} !== null`);
     }
+    for (const name of compound.classes) {
+      if (registered?.restrict === "C" && registered.registrationName === SelectorParser.toCamelCase(name)) continue;
+      parts.push(`ɵselectorClass($element[0], ${JSON.stringify(name)})`);
+    }
+    for (const negated of compound.not) parts.push(`!(${DecoratorWriter.conditionExpr(negated)})`);
+    return parts.length ? parts.join(" && ") : "true";
+  }
 
-    const tags = alternatives.map((parsed) => parsed.requiredTag);
-    if (tags.some((tag) => tag === undefined)) return undefined;
-    return [...new Set(tags as string[])];
+  /** Los helpers del guard — texto plano a nivel de archivo, si algún guard los usa. */
+  private static selectorHelperSource(): string {
+    return `function ɵselectorAttr(el, name) {
+  if (!el || el.nodeType !== 1) return null;
+  for (var i = 0; i < el.attributes.length; i++) {
+    var attr = el.attributes[i];
+    var normalized = attr.name.replace(/^(?:x|data)[:\\-_]/i, "").toLowerCase().replace(/[:\\-_]+(.)/g, function (_, c) { return c.toUpperCase(); });
+    if (normalized === name) return attr.value;
+  }
+  return null;
+}
+function ɵselectorClass(el, name) {
+  return !!el && el.nodeType === 1 && (" " + (el.getAttribute("class") || "") + " ").replace(/\\s+/g, " ").indexOf(" " + name + " ") !== -1;
+}`;
   }
 
   /**
@@ -271,6 +316,10 @@ export class DecoratorWriter {
     if (field === "ɵcmp") fields.push(`definition: ${JSON.stringify(ComponentDefinition.fields(metadata as ComponentMetadata, undefined, null))}`);
     else if ((metadata.options as { selector?: string }).selector) {
       fields.push(`definition: ${JSON.stringify(ComponentDefinition.directiveFields(metadata as DirectiveMetadata))}`);
+    } else {
+      // Base abstracta: sus bindings de AngularJS, para una subclase de otro paquete (`InheritedDefinition`).
+      const { bindings } = ComponentDefinition.directiveFields(metadata as DirectiveMetadata);
+      if (bindings) fields.push(`definition: ${JSON.stringify({ bindings })}`);
     }
     return `${metadata.className}.${field} = { ${fields.join(", ")} };`;
   }
@@ -312,25 +361,37 @@ export class DecoratorWriter {
   }
 
   /**
-   * Ivy: un array por selector de la lista (`a, b`), cada uno `[tag, attr, valor, ...]` —
+   * Ivy (`CssSelectorList`): un array por selector de la lista, `[tag, attr, valor, ..., flags, ...]` —
    * `"app-card"` → `[["app-card"]]`, `"[appFoo]"` → `[["", "appFoo", ""]]`,
-   * `"button[type=submit]"` → `[["button", "type", "submit"]]`. Clases/`:not()` no se soportan todavía.
+   * `"button[type=submit]"` → `[["button", "type", "submit"]]`, `".btn"` → `[["", 8, "btn"]]` (`SelectorFlags.CLASS`),
+   * `"input:not([type=radio])"` → `[["input", 3, "type", "radio"]]` (`NOT | ATTRIBUTE`).
    * `@Directive()` sin selector es una base abstracta (Angular): `selectors: []`, no se declara en ningún módulo.
    */
-  private static ivySelectors(className: string, selector: string | undefined, abstract: boolean): string[][] {
+  private static ivySelectors(className: string, selector: string | undefined, abstract: boolean): (string | number)[][] {
     if (!selector && abstract) return [];
     if (!selector) throw new Error(`DecoratorWriter: "${className}" no tiene selector.`);
+    let alternatives: ParsedSelector[];
+    try {
+      alternatives = SelectorParser.parse(selector);
+    } catch (error) {
+      throw new Error(`DecoratorWriter: "${className}" — ${(error as Error).message}`);
+    }
+    return alternatives.map(({ compound }) => DecoratorWriter.ivySelector(compound));
+  }
 
-    return selector.split(",").map((part) => {
-      const match = /^([a-zA-Z][\w-]*)?((?:\[[^\]=]+(?:=[^\]]*)?\])*)$/.exec(part.trim());
-      if (!match) throw new Error(`DecoratorWriter: "${className}" — selector ${JSON.stringify(selector)} no soportado todavía.`);
-
-      const attributes = [...(match[2] ?? "").matchAll(/\[([^\]=]+)(?:=([^\]]*))?\]/g)].flatMap(([, name, value]) => [
-        name!.trim(),
-        (value ?? "").trim().replace(/^["']|["']$/g, ""),
-      ]);
-      return [match[1] ?? "", ...attributes];
-    });
+  private static ivySelector(compound: CompoundSelector): (string | number)[] {
+    const NOT = 1;
+    const ATTRIBUTE = 2;
+    const ELEMENT = 4;
+    const CLASS = 8;
+    const result: (string | number)[] = [compound.tag ?? "", ...compound.attributes.flatMap(({ name, value }) => [name, value ?? ""])];
+    if (compound.classes.length) result.push(CLASS, ...compound.classes);
+    for (const negated of compound.not) {
+      if (negated.tag) result.push(NOT | ELEMENT, negated.tag);
+      if (negated.attributes.length) result.push(NOT | ATTRIBUTE, ...negated.attributes.flatMap(({ name, value }) => [name, value ?? ""]));
+      if (negated.classes.length) result.push(NOT | CLASS, ...negated.classes);
+    }
+    return result;
   }
 }
 

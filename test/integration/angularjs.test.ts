@@ -852,14 +852,14 @@ export class AppModule {}
       await expect(bootstrap("")).rejects.toThrow(/"ChildService" hereda el factory de su clase padre — agregale @Injectable\(\)/);
     });
 
-    it("base de OTRO paquete (compilado aparte): la subclase sin constructor usa el ɵfac de la base — su DI, sus inject() y su host — más lo propio", async () => {
+    it("base de OTRO paquete (compilado aparte): la subclase sin constructor usa el ɵfac de la base — su DI, sus inject(), su host y sus inputs/outputs — más lo propio", async () => {
       // La librería se compila sola (su propio escaneo) y se instala ya compilada en `node_modules`, como un paquete publicado.
       const libDir = await mkdtemp(join(tmpdir(), "ngjs-integration-lib-"));
       try {
         await writeFile(join(libDir, "package.json"), JSON.stringify({ name: "ext-lib" }), "utf8");
         await writeFile(
           join(libDir, "index.ts"),
-          `import { Directive, HostBinding, Injectable, inject } from "ngjs-core";
+          `import { Directive, HostBinding, Injectable, Input, Output, inject } from "ngjs-core";
 
 @Injectable()
 export class LibLogger { name = "lib-logger"; }
@@ -870,6 +870,8 @@ export class LibConfig { name = "lib-config"; }
 @Directive()
 export abstract class LibBase {
   @HostBinding("class.lib") readonly isLib = true;
+  @Input() label = "";
+  @Output() picked: unknown;
   readonly config = inject(LibConfig);
   constructor(readonly logger: LibLogger) {}
 }
@@ -902,13 +904,14 @@ export class Theme { name = "theme"; }
       );
       await write(
         "card.component.ts",
-        `import { Component, HostBinding, inject } from "ngjs-core";
+        `import { Component, HostBinding, Input, inject } from "ngjs-core";
 import { LibBase } from "ext-lib";
 import { Theme } from "./theme";
 
-@Component({ selector: "app-card", template: "<span>{{ $ctrl.logger.name }}</span>" })
+@Component({ selector: "app-card", template: "<span>{{ $ctrl.logger.name }}:{{ $ctrl.label }}:{{ $ctrl.size }}</span>" })
 export class CardComponent extends LibBase {
   @HostBinding("class.card") readonly isCard = true;
+  @Input() size = "";
   readonly theme = inject(Theme);
 }
 `,
@@ -926,15 +929,19 @@ export class AppModule {}
       );
       await write("main.ts", `import "./app.module";\n`);
 
-      const { dom, angular } = await bootstrap("<app-card></app-card>");
+      const { dom, angular, injector } = await bootstrap(`<app-card label="'Hola'" size="'L'" picked="seen = $event"></app-card>`);
 
       const element = dom.window.document.querySelector("app-card")!;
-      const card = angular.element(element).controller("appCard") as { constructor: { name: string }; logger: { name: string }; config: { name: string }; theme: { name: string } };
+      const card = angular.element(element).controller("appCard") as { constructor: { name: string }; logger: { name: string }; config: { name: string }; theme: { name: string }; picked: unknown };
       expect(card.constructor.name).toBe("CardComponent");
       expect(card.logger.name).toBe("lib-logger");
       expect(card.config.name).toBe("lib-config");
       expect(card.theme.name).toBe("theme");
-      expect(element.textContent).toBe("lib-logger");
+      expect(element.textContent).toBe("lib-logger:Hola:L");
+      // `@Output` de la base: el binding `&` llega (sin el bridge de ngjs-core, es la función del binding).
+      const $rootScope = injector.get("$rootScope") as { seen?: string };
+      (card.picked as (locals: object) => void)({ $event: "x" });
+      expect($rootScope.seen).toBe("x");
       expect(element.classList.contains("lib")).toBe(true);
       expect(element.classList.contains("card")).toBe(true);
     });
@@ -1020,6 +1027,52 @@ export class AppModule {}
         error.mockRestore();
       }
     });
+  });
+
+  it("selectores de Angular: .clase, [atributo=valor] y :not() — solo se aplican donde el selector entero coincide", async () => {
+    await write(
+      "directives.ts",
+      `import { Directive, HostBinding } from "ngjs-core";
+
+@Directive({ selector: ".app-badge" })
+export class BadgeDirective {
+  @HostBinding("attr.data-badge") readonly mark = "on";
+}
+
+@Directive({ selector: "button[type=submit]:not([disabled])" })
+export class SubmitDirective {
+  @HostBinding("attr.data-submit") readonly mark = "on";
+}
+`,
+    );
+    await write(
+      "app.module.ts",
+      `import { NgModule } from "ngjs-core";
+import { BadgeDirective, SubmitDirective } from "./directives";
+
+@NgModule({ declarations: [BadgeDirective, SubmitDirective], imports: [], providers: [] })
+export class AppModule {}
+`,
+    );
+    await write("main.ts", `import "./app.module";\n`);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { dom, injector } = await bootstrap(
+        `<span id="badge" class="x app-badge"></span><span id="plain" class="x"></span>
+<button id="submit" type="submit"></button><button id="button" type="button"></button><button id="disabled" type="submit" disabled></button>`,
+      );
+      (injector.get("$rootScope") as { $digest(): void }).$digest();
+      const mark = (id: string, name: string) => dom.window.document.getElementById(id)!.getAttribute(name);
+
+      expect(mark("badge", "data-badge")).toBe("on");
+      expect(mark("plain", "data-badge")).toBeNull();
+      expect(mark("submit", "data-submit")).toBe("on");
+      expect(mark("button", "data-submit")).toBeNull();
+      expect(mark("disabled", "data-submit")).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   describe("multi-providers entre módulos", () => {

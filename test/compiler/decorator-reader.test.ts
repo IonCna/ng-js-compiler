@@ -808,4 +808,24 @@ describe("DecoratorReader.read", () => {
     await DecoratorReader.read(code, "multi.ts");
     expect(MetadataStore.get("multi.ts")).toHaveLength(2);
   });
+
+  it("envoltorios de TS en los decoradores (as, satisfies, as const, !, paréntesis) se leen como el valor de adentro", async () => {
+    const code = `
+      import { Component, Input, NgModule } from "ngjs-core";
+      import { Logger } from "./logger";
+      @Component({ selector: "app-card", template: "", inputs: (["title"] as const) } satisfies object)
+      export class CardComponent {
+        @Input({ alias: "aka", binding: "@" } as never) label = "";
+      }
+      @NgModule({ declarations: [CardComponent] as unknown[], providers: [Logger]! })
+      export class AppModule {}
+    `;
+    await DecoratorReader.read(code, "wrapped.ts");
+    const [card, module] = MetadataStore.get("wrapped.ts") as [ComponentMetadata, NgModuleMetadata];
+
+    expect((card.options as { selector: string }).selector).toBe("app-card");
+    expect(card.inputs).toEqual(expect.arrayContaining([expect.objectContaining({ propName: "title" }), expect.objectContaining({ propName: "label", bindingName: "aka", mode: "@" })]));
+    expect(module.declarations).toEqual(["CardComponent"]);
+    expect(module.providers).toHaveLength(1);
+  });
 });

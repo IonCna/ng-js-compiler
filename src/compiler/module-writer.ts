@@ -6,6 +6,7 @@ import { ComponentDefinition } from "@/compiler/component-definition.ts";
 import { ElementInstances } from "@/compiler/element-instances.ts";
 import { FactoryCode } from "@/compiler/factory-code.ts";
 import { HashId } from "@/compiler/hash-id.ts";
+import { InheritedDefinition } from "@/compiler/inherited-definition.ts";
 import { CodeEdit } from "@/compiler/code-edit.ts";
 import type { NgjsTransform, TransformOutput } from "@/compiler/ngjs-transform.ts";
 import { ModuleWithProvidersRuntime } from "@/compiler/module-with-providers-runtime.ts";
@@ -243,13 +244,15 @@ export class ModuleWriter {
    * de los tags, así que registrar dos veces bajo el mismo nombre no suma nada y AngularJS lo rechaza
    * (`$compile:multidir`: dos directivas pidiendo el mismo `controllerAs` en el mismo elemento).
    */
+  /** Un registro por nombre; mismo nombre por atributo y por clase (`[x], .x`) junta los `restrict` (`"AC"`). */
   private static uniqueByName(alternatives: ParsedSelector[]): ParsedSelector[] {
-    const seen = new Set<string>();
-    return alternatives.filter((parsed) => {
-      if (seen.has(parsed.registrationName)) return false;
-      seen.add(parsed.registrationName);
-      return true;
-    });
+    const byName = new Map<string, ParsedSelector>();
+    for (const parsed of alternatives) {
+      const seen = byName.get(parsed.registrationName);
+      if (!seen) byName.set(parsed.registrationName, parsed);
+      else if (!seen.restrict.includes(parsed.restrict)) byName.set(parsed.registrationName, { ...seen, restrict: `${seen.restrict}${parsed.restrict}` as ParsedSelector["restrict"] });
+    }
+    return [...byName.values()];
   }
 
   /**
@@ -264,6 +267,8 @@ export class ModuleWriter {
     const alternatives = SelectorParser.parse(options.selector);
 
     const definition = ComponentDefinition.fields(node.metadata as ComponentMetadata, moduleControllerAs);
+    // Con una base de otro paquete, los bindings salen de `ɵcmp.definition` ya sumados en runtime (`InheritedDefinition`).
+    const inheritedBindings = ModuleWriter.inheritedBindings(node, "ɵcmp");
     const fields = (entries: Record<string, unknown>) => [
       `controller: ${node.className}.ɵfac`,
       ...Object.entries(entries).map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
@@ -274,7 +279,7 @@ export class ModuleWriter {
     const elements = ModuleWriter.uniqueByName(alternatives.filter((parsed) => parsed.restrict === "E"));
     const attributes = ModuleWriter.uniqueByName(alternatives.filter((parsed) => parsed.restrict !== "E"));
     return [...elements, ...attributes].flatMap((parsed) => [
-      ModuleWriter.componentRegistration(parsed, definition, fields),
+      ModuleWriter.componentRegistration(parsed, definition, fields, inheritedBindings),
       ...ModuleWriter.outputAttributesCall(parsed, metadata.outputs),
     ]);
   }
@@ -283,13 +288,18 @@ export class ModuleWriter {
     parsed: ParsedSelector,
     definition: Record<string, unknown>,
     fields: (entries: Record<string, unknown>) => string[],
+    inheritedBindings: string | undefined,
   ): string {
-    if (parsed.restrict === "E") return `.component(${JSON.stringify(parsed.registrationName)}, { ${fields(definition).join(", ")} })`;
+    const { bindings = {}, ...rest } = definition as { bindings?: Record<string, string> };
+    const bindingsCode = inheritedBindings ?? JSON.stringify(bindings);
+    if (parsed.restrict === "E") {
+      const component = inheritedBindings || Object.keys(bindings).length ? [...fields(rest), `bindings: ${bindingsCode}`] : fields(rest);
+      return `.component(${JSON.stringify(parsed.registrationName)}, { ${component.join(", ")} })`;
+    }
     // Selector de atributo (`[ngbAccordionBody]`): `.component()` solo sabe de elementos, así que va como la directiva
     // que `.component()` arma por dentro — scope aislado (su `controllerAs` no pisa el del padre) y los `bindings`
     // como `bindToController`.
-    const { bindings = {}, ...rest } = definition as { bindings?: Record<string, string> };
-    const directive = [...fields(rest), `restrict: ${JSON.stringify(parsed.restrict)}`, "scope: {}", `bindToController: ${JSON.stringify(bindings)}`];
+    const directive = [...fields(rest), `restrict: ${JSON.stringify(parsed.restrict)}`, "scope: {}", `bindToController: ${bindingsCode}`];
     return `.directive(${JSON.stringify(parsed.registrationName)}, function () { return { ${directive.join(", ")} }; })`;
   }
 
@@ -321,12 +331,15 @@ export class ModuleWriter {
     }
     const alternatives = ModuleWriter.uniqueByName(SelectorParser.parse(options.selector));
     const bindings = ComponentBindings.from(metadata.inputs, metadata.outputs);
+    // Con una base de otro paquete, los bindings salen de `ɵdir.definition` ya sumados en runtime (`InheritedDefinition`).
+    const inheritedBindings = ModuleWriter.inheritedBindings(node, "ɵdir");
+    const bindToController = inheritedBindings ?? (Object.keys(bindings).length ? JSON.stringify(bindings) : "true");
 
     return alternatives.flatMap((parsed) => {
       const fields = [
         `controller: ${node.className}.ɵfac`,
         `restrict: ${JSON.stringify(parsed.restrict)}`,
-        `bindToController: ${Object.keys(bindings).length ? JSON.stringify(bindings) : "true"}`,
+        `bindToController: ${bindToController}`,
         `controllerAs: ${JSON.stringify(options.controllerAs ?? (options.template !== undefined || options.templateUrl !== undefined ? moduleControllerAs : undefined) ?? parsed.registrationName)}`,
       ];
       if (options.template !== undefined) fields.push(`template: ${JSON.stringify(options.template)}`);
@@ -338,6 +351,12 @@ export class ModuleWriter {
         ...ModuleWriter.outputAttributesCall(parsed, metadata.outputs),
       ];
     });
+  }
+
+  /** Expresión de los bindings de una clase cuya cadena sale del proyecto (`InheritedDefinition`), o `undefined`. */
+  private static inheritedBindings(node: ApplicationNode, field: "ɵcmp" | "ɵdir"): string | undefined {
+    if (ClassHierarchy.externalBaseHops(node.metadata) === undefined) return undefined;
+    return InheritedDefinition.bindingsExpr(node.className, field);
   }
 
   /** La instancia sale de `ɵfac` vía `$injector.invoke` (con sus deps de constructor); el filtro delega en `transform` con `value` + args extra. */

@@ -105,8 +105,12 @@ export interface HostDirectiveDef {
 
 /** `ClassName.ɵdir` / `ClassName.ɵcmp`. Una `@Directive()` abstracta (sin selector) lleva `selectors: []`. */
 export interface DirectiveDef {
-  /** Un array por selector de la lista: `[tag, attr, valor, ...]` — `"app-card"` → `[["app-card"]]`, `"[x]"` → `[["", "x", ""]]`. */
-  selectors: string[][];
+  /**
+   * Un array por selector de la lista, como Ivy: `[tag, attr, valor, ..., flag, ...]` — `"app-card"` → `[["app-card"]]`,
+   * `"[x]"` → `[["", "x", ""]]`, `".x"` → `[["", 8, "x"]]`; los números son `SelectorFlags` (`NOT` 1, `ATTRIBUTE` 2,
+   * `ELEMENT` 4, `CLASS` 8) y lo que sigue a uno es de esa clase.
+   */
+  selectors: (string | number)[][];
   /** Nombre público → propiedad (`@Input("aka") alias` → `{ aka: "alias" }`), con los de las bases del proyecto. */
   inputs: Record<string, string>;
   outputs: Record<string, string>;
@@ -173,7 +177,27 @@ export interface NgjsPlatform {
   bootstrapModule(moduleType: CompiledClass): Promise<auto.IInjectorService>;
 }
 
+/** `globalThis.ɵngjsZone` — la zona de los patches globales: `inside()` al programar, `runIn()` al correr. */
+export interface NgjsZone {
+  /** `false` mientras corre `NgZone.runOutsideAngular()`: lo programado ahora no dispara digest al correr. */
+  inside(): boolean;
+  /** Corre `fn` en la zona donde se programó (`inside`): adentro, con digest al terminar. */
+  runIn<T>(inside: boolean, fn: (...args: unknown[]) => T, self: unknown, args: ArrayLike<unknown>): T;
+}
+
+/** `globalThis.ɵngjsFakeAsync` — el reloj de `fakeAsync` mientras está activo; los patches le entregan el trabajo. */
+export interface NgjsFakeAsyncScheduler {
+  schedule(kind: "timeout" | "interval" | "animationFrame", run: (...args: unknown[]) => void, delay?: number): number;
+  /** `true` si el id era suyo (y lo sacó). */
+  cancel(id: unknown): boolean;
+  queueMicrotask(run: () => void): void;
+}
+
 declare global {
+  /** Ver `NgjsZone`. */
+  var ɵngjsZone: NgjsZone | undefined;
+  /** Ver `NgjsFakeAsyncScheduler`. */
+  var ɵngjsFakeAsync: NgjsFakeAsyncScheduler | undefined;
   /** Ver `NgjsPlatform`. */
   var ɵngjsPlatform: NgjsPlatform | undefined;
   /** Cola de `providedIn: "root"`: `[nombre de DI, anotación]`, en orden de evaluación. */

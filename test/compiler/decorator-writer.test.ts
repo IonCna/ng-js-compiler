@@ -9,6 +9,17 @@ function evaluate(output: string, className: string): Record<string, unknown> {
   return new Function(`${output}; return ${className};`)() as Record<string, unknown>;
 }
 
+/** Un `$element` de mentira con atributos reales (lo que leen `ɵtag`/`ɵselectorAttr`/`ɵselectorClass`). */
+function fakeElement(tag: string, attributes: Record<string, string>): Record<number, unknown> {
+  const node = {
+    nodeType: 1,
+    tagName: tag.toUpperCase(),
+    attributes: Object.entries(attributes).map(([name, value]) => ({ name, value })),
+    getAttribute: (name: string) => attributes[name] ?? null,
+  };
+  return { 0: node };
+}
+
 function component(overrides: Partial<ComponentMetadata> = {}): ComponentMetadata {
   return {
     kind: "component",
@@ -291,7 +302,7 @@ describe("DecoratorWriter", () => {
     warn.mockRestore();
   });
 
-  it("lista por coma mixta (una compuesta + una sin tag, \"[foo], button[bar]\"): sin guard — no se sabe cuál alternativa matcheó", () => {
+  it("lista por coma mixta (\"[foo], button[bar]\"): registros distintos — el guard mira cada alternativa entera", () => {
     const directive: DirectiveMetadata = {
       ...component({ className: "Mixed" }),
       kind: "directive",
@@ -299,10 +310,16 @@ describe("DecoratorWriter", () => {
     };
     MetadataStore.set("mixed.ts", [directive]);
 
-    const output = DecoratorWriter.write("class Mixed {}", "mixed.ts")!;
+    const Mixed = evaluate(DecoratorWriter.write("class Mixed {}", "mixed.ts")!, "Mixed") as unknown as new () => object;
+    const fac = (Mixed as unknown as { ɵfac: unknown[] }).ɵfac;
+    const factory = fac[fac.length - 1] as (element: unknown, scope: unknown) => object;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    expect(output).not.toContain("tagName");
-    expect(output).not.toContain("console.warn");
+    expect(factory(fakeElement("div", { "data-foo": "" }), {})).toBeInstanceOf(Mixed);
+    expect(factory(fakeElement("button", { bar: "" }), {})).toBeInstanceOf(Mixed);
+    expect(factory(fakeElement("span", { bar: "" }), {})).not.toBeInstanceOf(Mixed);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("selector simple ([atributo] o tag): sin guard de tag en el factory", () => {
@@ -314,10 +331,37 @@ describe("DecoratorWriter", () => {
     expect(output).not.toContain("console.warn");
   });
 
-  it("selector no soportado (clases) es error claro", () => {
-    MetadataStore.set("card.ts", [component({ options: { selector: ".card" } })]);
+  it("[atributo=valor], .clase y :not(): se registra por uno y el guard valida el resto; selectors con la forma de Ivy", () => {
+    const directive: DirectiveMetadata = {
+      ...component({ className: "SubmitButton" }),
+      kind: "directive",
+      options: { selector: "button[type=submit].btn:not([disabled])" },
+    };
+    MetadataStore.set("submit.ts", [directive, { ...component({ className: "CardBody" }), kind: "directive", options: { selector: ".card-body" } } as DirectiveMetadata]);
 
-    expect(() => DecoratorWriter.write("class CardComponent {}", "card.ts")).toThrow(/selector ".card" no soportado/);
+    const output = DecoratorWriter.write("class SubmitButton {}\nclass CardBody {}", "submit.ts")!;
+    const SubmitButton = evaluate(output, "SubmitButton") as unknown as new () => object;
+    const def = (SubmitButton as unknown as { ɵdir: { selectors: unknown } }).ɵdir;
+    expect(def.selectors).toEqual([["button", "type", "submit", 8, "btn", 3, "disabled", ""]]);
+    expect((evaluate(output, "CardBody") as unknown as { ɵdir: { selectors: unknown } }).ɵdir.selectors).toEqual([["", 8, "card-body"]]);
+    // Una sola alternativa registrada por `type`: el guard no la vuelve a mirar, pero sí su valor.
+    expect(output).not.toContain('ɵselectorAttr($element[0], "type") !== null');
+
+    const fac = (SubmitButton as unknown as { ɵfac: unknown[] }).ɵfac;
+    const factory = fac[fac.length - 1] as (element: unknown, scope: unknown) => object;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(factory(fakeElement("button", { type: "submit", class: "btn big" }), {})).toBeInstanceOf(SubmitButton);
+    expect(factory(fakeElement("button", { type: "button", class: "btn" }), {})).not.toBeInstanceOf(SubmitButton);
+    expect(factory(fakeElement("button", { type: "submit" }), {})).not.toBeInstanceOf(SubmitButton);
+    expect(factory(fakeElement("button", { type: "submit", class: "btn", disabled: "" }), {})).not.toBeInstanceOf(SubmitButton);
+    expect(warn).toHaveBeenCalledWith('SubmitButton: el elemento no cumple el selector "button[type=submit].btn:not([disabled])", no se aplica en <button>.');
+    warn.mockRestore();
+  });
+
+  it("selector que no es de Angular (combinador) es error claro", () => {
+    MetadataStore.set("card.ts", [component({ options: { selector: "div > app-card" } })]);
+
+    expect(() => DecoratorWriter.write("class CardComponent {}", "card.ts")).toThrow(/"CardComponent" — .*"div > app-card" no es un selector de Angular/);
   });
 
   it("ɵprov con el token resuelto en build; providedIn solo si es 'root'", () => {
