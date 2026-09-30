@@ -64,7 +64,10 @@ export class ClassHierarchy {
       inputs: merge((member) => member.inputs, (input) => input.propName),
       outputs: merge((member) => member.outputs, (output) => output.propName),
       hostBindings: merge((member) => member.hostBindings, (binding) => binding.propName),
-      hostListeners: merge((member) => member.hostListeners, (listener) => `${listener.eventName}:${listener.methodName}`),
+      hostListeners: merge((member) => member.hostListeners, (listener) => `${listener.eventName}:${listener.methodName || listener.handler}`),
+      ...(elements.some((member) => member.hostAttributes) && {
+        hostAttributes: Object.assign({}, ...elements.map((member) => member.hostAttributes ?? {})) as Record<string, string>,
+      }),
       lifecycleHooks: merge((member) => member.lifecycleHooks, (hook) => hook),
       // Como Ivy (`ɵɵInheritDefinitionFeature`): las queries y los `hostDirectives` del padre también valen para el hijo.
       queries: merge((member) => member.queries, (query) => query.propertyName),

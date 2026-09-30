@@ -93,16 +93,29 @@ export type ProviderMetadata =
   | { kind: "useExisting"; token: string; existingToken: string; multi: boolean };
 
 export interface BindingsMetadata {
-  /** `mode: "@"` = `@Input({ binding: "@" })`, binding de interpolación de AngularJS; sin `mode`, `<`. */
-  inputs: { propName: string; bindingName: string; mode?: "@" }[];
+  /**
+   * `mode: "@"` = `@Input({ binding: "@" })`, binding de interpolación de AngularJS; sin `mode`, `<`. `required`: el
+   * compilador de templates exige el atributo en cada uso. `transformExpr`: texto fuente de `transform` (lo estampa la
+   * clase que declara el input en `ɵinputTransforms`, ver `InputTransforms`).
+   */
+  inputs: { propName: string; bindingName: string; mode?: "@"; required?: true; transformExpr?: string }[];
   outputs: { propName: string; bindingName: string }[];
-  hostBindings: { propName: string; hostProperty: string }[];
+  /**
+   * `@HostBinding` (el valor es `instance.<propName>`) o `"[prop]": "expr"` de `host` (`expr`: JS ya traducido sobre
+   * `instance`, ver `HostExpression`; `propName` solo identifica el binding).
+   */
+  hostBindings: { propName: string; hostProperty: string; expr?: string }[];
   /**
    * `args` son las expresiones del segundo argumento de `@HostListener` (`['$event', '$event.target']`),
    * ya validadas en build: cada una tiene que empezar con `$event` (nada más se resuelve). Sin segundo
    * argumento (`@HostListener('click')`) queda `[]` — el método se llama sin parámetros, como en Angular real.
    */
-  hostListeners: { methodName: string; eventName: string; args: string[] }[];
+  hostListeners: { methodName: string; eventName: string; args: string[]; handler?: string }[];
+  /**
+   * `"(evento)": "sentencias"` de `host` guarda en `handler` las sentencias ya traducidas (`HostExpression`, con
+   * `event`); ahí `methodName` queda `""`. Los atributos estáticos de `host` (`role: "alert"`) van en `hostAttributes`.
+   */
+  hostAttributes?: Record<string, string>;
   /** Solo se lee — todavía no se emite nada con ellos (providers a nivel componente es un ítem aparte). */
   providers: ProviderMetadata[];
   /**
