@@ -22,6 +22,7 @@ import type {
   ProviderMetadata,
 } from "@/metadata/decorator-metadata.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
+import { HmrRuntime } from "@/vite/hmr-runtime.ts";
 
 /** Binding del `import` de angular que emite cada archivo con un `@NgModule` (propio, para no chocar con un `import angular` del usuario). */
 const ANGULAR = "ɵangular";
@@ -40,8 +41,16 @@ const ANGULAR = "ɵangular";
  * — determinista, así el import de `FeatureModule` puede calcularse acá sin
  * esperar a que el archivo de `FeatureModule` se haya procesado.
  */
+/** `hmr` (solo `ngjs serve`): cada `@Component` registra además la directiva de `HmrRuntime.sourceDirective`. */
+export interface ModuleWriterOptions {
+  hmr?: boolean;
+}
+
 export class ModuleWriter {
-  constructor(private readonly scanner: ApplicationScanner) {}
+  constructor(
+    private readonly scanner: ApplicationScanner,
+    private readonly options: ModuleWriterOptions = {},
+  ) {}
 
   /** Contra la metadata del escaneo de `scanner` — la misma compilación que resolvió el grafo. */
   write(code: string, path: string): string | undefined {
@@ -74,7 +83,7 @@ export class ModuleWriter {
       const isRoot = (metadata as NgModuleMetadata).bootstrap.length > 0;
       const attachScopedInjector = (isRoot && needsScopedInjector) || ModuleWriter.declaresScopedProviders(node);
       scopedInjectorEmitted ||= attachScopedInjector;
-      return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve, lazyControllers);
+      return ModuleWriter.moduleStatement(node, attachScopedInjector, registerResolve, lazyControllers, this.options.hmr === true);
     });
 
     const needsModuleWithProviders = modules.some((metadata) => this.scanner.get(metadata.className, path)!.callImports.length > 0);
@@ -102,7 +111,13 @@ export class ModuleWriter {
     return [...components, ...directives].some((declared) => (declared.metadata as ComponentMetadata | DirectiveMetadata).providers.length > 0);
   }
 
-  private static moduleStatement(node: ApplicationNode, attachScopedInjector: boolean, registerResolve: boolean, lazyControllers: boolean): string {
+  private static moduleStatement(
+    node: ApplicationNode,
+    attachScopedInjector: boolean,
+    registerResolve: boolean,
+    lazyControllers: boolean,
+    hmr: boolean,
+  ): string {
     const id = ModuleWriter.idFor(node);
     // Cada llamada de `imports` (`ConfigModule.forRoot(options)`) se evalúa UNA vez: su resultado da el nombre
     // del módulo (`requires`) y los `providers` a registrar. Ver `ModuleWithProvidersRuntime`.
@@ -125,7 +140,7 @@ export class ModuleWriter {
       ...(registerResolve ? [ResolveDependency.factoryFragment()] : []),
       ...(attachScopedInjector ? [ScopedInjectorRuntime.decoratorFragment()] : []),
       ...(lazyControllers ? [ElementInstances.decoratorFragment()] : []),
-      ...node.declarations.components.flatMap((declared) => ModuleWriter.componentCall(declared, node.controllerAs)),
+      ...node.declarations.components.flatMap((declared) => ModuleWriter.componentCall(declared, node.controllerAs, hmr)),
       ...node.declarations.directives.flatMap((declared) => ModuleWriter.directiveCall(declared, node.controllerAs)),
       ...node.declarations.pipes.map(ModuleWriter.pipeCall),
       ...ModuleWriter.instanceCalls(node),
@@ -264,7 +279,7 @@ export class ModuleWriter {
    * pero TODAS las alternativas se validan antes de deduplicar: si una alternativa inválida comparte nombre
    * con una válida, el dedupe la taparía y el error nunca saldría.
    */
-  private static componentCall(node: ApplicationNode, moduleControllerAs: string | undefined): string[] {
+  private static componentCall(node: ApplicationNode, moduleControllerAs: string | undefined, hmr: boolean): string[] {
     // Con los inputs/outputs heredados de sus bases del proyecto (`ClassHierarchy`).
     const metadata = ClassHierarchy.effective(node.metadata as ComponentMetadata);
     const options = metadata.options as { selector: string; template?: string; templateUrl?: string; controllerAs?: string };
@@ -285,6 +300,7 @@ export class ModuleWriter {
     return [...elements, ...attributes].flatMap((parsed) => [
       ModuleWriter.componentRegistration(parsed, definition, fields, inheritedBindings),
       ...ModuleWriter.outputAttributesCall(parsed, metadata.outputs),
+      ...(hmr ? [HmrRuntime.sourceDirectiveCall(parsed.registrationName, parsed.restrict)] : []),
     ]);
   }
 
@@ -375,7 +391,7 @@ export class ModuleWriter {
 
 }
 
-export function createModuleWriterTransform(scanner: ApplicationScanner): NgjsTransform {
-  const writer = new ModuleWriter(scanner);
+export function createModuleWriterTransform(scanner: ApplicationScanner, options: ModuleWriterOptions = {}): NgjsTransform {
+  const writer = new ModuleWriter(scanner, options);
   return { transform: (code, path) => Promise.resolve(writer.writeWithMap(code, path)) };
 }

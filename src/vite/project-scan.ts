@@ -11,7 +11,10 @@ import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
  * nunca compilan contra el grafo viejo.
  */
 export class ProjectScan {
+  /** `ngjs serve`: `ModuleWriter` registra lo que necesita el hot reload (ver `HmrRuntime`). Antes del primer escaneo. */
+  hmr = false;
   private transforms: NgjsTransform[];
+  private scanner: ApplicationScanner | undefined;
   private pending: Promise<void> = Promise.resolve();
   private readonly roots: string[];
 
@@ -38,6 +41,12 @@ export class ProjectScan {
     return this.pending;
   }
 
+  /** `fn` contra la metadata del último escaneo (después de esperar el que esté en curso). */
+  async within<T>(fn: () => T): Promise<T | undefined> {
+    await this.pending.catch(() => undefined);
+    return this.scanner?.within(fn);
+  }
+
   /** `true` si `file` es un `.ts` de alguna raíz escaneada — lo que puede cambiar el grafo. */
   covers(file: string): boolean {
     if (!file.endsWith(".ts")) return false;
@@ -48,6 +57,7 @@ export class ProjectScan {
   private async scan(): Promise<void> {
     const scanner = new ApplicationScanner();
     await scanner.scan(this.sourceRoot, { transforms: this.extraTransforms });
-    this.transforms = [...this.extraTransforms, ...createNgjsCompilerTransforms(scanner)];
+    this.scanner = scanner;
+    this.transforms = [...this.extraTransforms, ...createNgjsCompilerTransforms(scanner, { hmr: this.hmr })];
   }
 }

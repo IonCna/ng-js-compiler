@@ -2,6 +2,8 @@ import { PlatformCode, type ProjectType } from "@/compiler/platform-code.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 import { AsyncDownlevel } from "@/compiler/async-downlevel.ts";
 import { TransformChain } from "@/compiler/transform-chain.ts";
+import { HmrBoundary } from "@/vite/hmr-boundary.ts";
+import { HmrRuntime } from "@/vite/hmr-runtime.ts";
 import { ProjectScan } from "@/vite/project-scan.ts";
 import type { Plugin } from "vite";
 
@@ -16,6 +18,9 @@ import type { Plugin } from "vite";
  *
  * En el dev-server el escaneo se rehace con cada cambio de un `.ts` de `sourceRoot` (`ProjectScan`): un módulo
  * nuevo tiene que entrar al grafo, y la salida de un `@NgModule` depende de archivos que no se tocaron.
+ *
+ * Hot reload (dev-server de una aplicación): solo los archivos de `@Component` se actualizan en caliente
+ * (`HmrBoundary`/`HmrRuntime`); cualquier otro cambio del proyecto recarga la página.
  */
 export function viteTransformPlugin(
   sourceRoot: string | string[],
@@ -23,10 +28,15 @@ export function viteTransformPlugin(
   projectType: ProjectType = "application",
 ): Plugin {
   const scan = new ProjectScan(sourceRoot, extraTransforms);
+  let hmr = false;
 
   return {
     name: "ngjs-compiler",
     enforce: "pre",
+    configResolved(config) {
+      hmr = config.command === "serve" && projectType === "application";
+      scan.hmr = hmr;
+    },
     async buildStart() {
       await scan.rescan();
     },
@@ -50,7 +60,22 @@ export function viteTransformPlugin(
     // La plataforma (`globalThis.ɵngjsPlatform`) antes que los `<script type="module">` de la app — solo en una
     // aplicación (una librería no arranca nada).
     transformIndexHtml() {
-      return projectType === "application" ? [PlatformCode.htmlTag()] : [];
+      if (projectType !== "application") return [];
+      return hmr ? [PlatformCode.htmlTag(), HmrRuntime.htmlTag()] : [PlatformCode.htmlTag()];
+    },
+    /**
+     * Sin esto Vite sube el cambio por los importadores hasta un módulo que lo acepte — un `@Component` que importa un
+     * servicio editado se recompilaría con la instancia vieja del servicio. Solo un archivo de `@Component` sigue el
+     * camino normal (su propio `accept`); el resto del proyecto (`.ts` o lo que importen, como un `.html?raw`) recarga.
+     * Un `.css` lo actualiza Vite, y lo que no está en el grafo (los templates de `ngjs serve`) no pasa por acá.
+     */
+    async handleHotUpdate({ file, modules, server }) {
+      if (!hmr || file.endsWith(".css")) return;
+      if (scan.covers(file) && (await scan.within(() => HmrBoundary.isComponentFile(file)))) return;
+      if (!scan.covers(file) && modules.length === 0) return;
+
+      server.ws.send({ type: "full-reload", path: "*" });
+      return [];
     },
     async transform(code, id) {
       // Dependencias que sirve el dev-server (pre-bundleadas en `.vite/deps` o no): no pasan por el compilador ni por
@@ -60,6 +85,9 @@ export function viteTransformPlugin(
       if (!id.endsWith(".ts")) return;
 
       const output = await TransformChain.run(code, id, await scan.ready());
+      // Agregado al final: el source map sigue valiendo tal cual.
+      const accept = hmr && scan.covers(id) ? await scan.within(() => HmrBoundary.acceptCode(id)) : undefined;
+      if (accept) return { code: `${output?.code ?? code}${accept}`, map: output ? output.map : null };
       return output && { code: output.code, map: output.map };
     },
   };

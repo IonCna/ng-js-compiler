@@ -3,7 +3,7 @@ import { decoratorMetadataTransform } from "@/compiler/decorator-metadata-transf
 import { decoratorReaderTransform } from "@/compiler/decorator-reader.ts";
 import { decoratorWriterTransform } from "@/compiler/decorator-writer.ts";
 import { injectionTokenWriterTransform } from "@/compiler/injection-token-writer.ts";
-import { createModuleWriterTransform } from "@/compiler/module-writer.ts";
+import { createModuleWriterTransform, type ModuleWriterOptions } from "@/compiler/module-writer.ts";
 import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
 
 /**
@@ -15,12 +15,12 @@ import type { NgjsTransform } from "@/compiler/ngjs-transform.ts";
  * ANTES de emitir el primer archivo. El template scoping NO va acá — es
  * responsabilidad de quien consuma este paquete.
  */
-export function createNgjsCompilerTransforms(scanner: ApplicationScanner): NgjsTransform[] {
+export function createNgjsCompilerTransforms(scanner: ApplicationScanner, options: ModuleWriterOptions = {}): NgjsTransform[] {
   const transforms = [
     decoratorReaderTransform,
     decoratorWriterTransform,
     injectionTokenWriterTransform,
-    createModuleWriterTransform(scanner),
+    createModuleWriterTransform(scanner, options),
     decoratorMetadataTransform,
   ];
   // Cada uno contra la metadata de ESTA compilación (la del escaneo), no la de otra que corra en el mismo proceso.
