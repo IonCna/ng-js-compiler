@@ -20,7 +20,9 @@
  *   (optimización interna de V8, no hay vuelta). Por eso el compilador baja SIEMPRE `async/await` a
  *   generadores (`decoratorMetadataTransform`, con SWC) y `pluginLoader` hace lo mismo con las dependencias
  *   (`supported` de esbuild, `AsyncDownlevel`) — el helper reanuda con `.then()`, así el patch los agarra igual,
- *   indirectamente, sin bajar el resto de la sintaxis (como Angular CLI con Zone.js).
+ *   indirectamente, sin bajar el resto de la sintaxis (como Angular CLI con Zone.js). El digest de los `.then` no
+ *   corre tras cada callback sino cuando se vacía la cola de microtasks (`onMicrotaskEmpty` de Zone.js): una cadena
+ *   da un solo digest, y una promesa devuelta por el callback ya está adoptada (con sus handlers) al correr.
  *
  * `NgZone.runOutsideAngular` (de `ngjs-core`) marca `globalThis.ɵngjsOutsideAngular` mientras corre: lo programado ahí
  * no dispara digest (se decide al programar, como la zona de Angular) y, al correr, sigue afuera: lo que ESE callback
@@ -72,6 +74,43 @@ export class ZonePatchesRuntime {
       return fn.apply(self, args);
     } finally {
       globalThis.ɵngjsOutsideAngular--;
+    }
+  }
+
+  // \`.then\` (microtasks): el digest corre cuando se vacía la cola de microtasks, como \`onMicrotaskEmpty\` de Zone.js,
+  // no tras cada callback. Si el callback devuelve una promesa (la \`$q\` de un hook de UI-Router), el motor la adopta
+  // en un microtask POSTERIOR: un digest inmediato veía esa promesa rechazada todavía sin handlers y \`$q\` reportaba
+  // "Possibly unhandled rejection". Además, una cadena de \`.then\` termina en un solo digest. "Vacía": una vuelta de
+  // microtask sin callbacks \`.then\` nuevos; el tope evita esperar para siempre si la app encadena microtasks sin fin.
+  var ɵnativeQueueMicrotask = typeof window.queueMicrotask === "function" ? window.queueMicrotask.bind(window) : null;
+  var ɵMAX_DRAIN_TURNS = 100;
+  var ɵmicrotaskActivity = 0;
+  var ɵdrainScheduled = false;
+  function ɵapplyWhenMicrotasksDrain() {
+    if (!ɵnativeQueueMicrotask) return ɵsafeApply();
+    if (ɵdrainScheduled) return;
+    ɵdrainScheduled = true;
+    var seen = -1;
+    var turns = 0;
+    var check = function () {
+      if (ɵmicrotaskActivity !== seen && turns < ɵMAX_DRAIN_TURNS) {
+        seen = ɵmicrotaskActivity;
+        turns++;
+        ɵnativeQueueMicrotask(check);
+        return;
+      }
+      ɵdrainScheduled = false;
+      ɵsafeApply();
+    };
+    ɵnativeQueueMicrotask(check);
+  }
+  function ɵrunInMicrotask(inside, fn, self, args) {
+    if (!inside) return ɵrunIn(false, fn, self, args);
+    ɵmicrotaskActivity++;
+    try {
+      return fn.apply(self, args);
+    } finally {
+      ɵapplyWhenMicrotasksDrain();
     }
   }
 
@@ -165,7 +204,7 @@ export class ZonePatchesRuntime {
     if (ɵisResolver(onFulfilled) && ɵisResolver(onRejected)) return ɵthen.call(this, onFulfilled, onRejected);
     var inside = ɵinside();
     var wrap = function (fn) {
-      return typeof fn === "function" ? function (value) { return ɵrunIn(inside, fn, undefined, [value]); } : fn;
+      return typeof fn === "function" ? function (value) { return ɵrunInMicrotask(inside, fn, undefined, [value]); } : fn;
     };
     return ɵthen.call(this, wrap(onFulfilled), wrap(onRejected));
   };

@@ -22,6 +22,14 @@ function fakeScope(): { $root: { $$phase: string | null }; $apply: () => void; c
   return scope;
 }
 
+/**
+ * Espera a que se vacíe la cola de microtasks: un timer de Node (no el `setTimeout` parcheado de la ventana, que
+ * dispararía su propio `$apply`) corre recién cuando no queda ningún microtask, de ningún realm.
+ */
+function microtasksDrained(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("ZonePatchesRuntime", () => {
   it("no se instala dos veces (guard de globalThis.ɵngjsZonePatched) — se detecta en que el segundo eval no reemplaza los globales otra vez", () => {
     const win = evaluate();
@@ -103,7 +111,49 @@ describe("ZonePatchesRuntime", () => {
     });
 
     expect(received).toBe(1);
+    await microtasksDrained();
     expect(scope.calls).toBe(1);
+  });
+
+  it("Promise.prototype.then: una cadena de .then termina en UN digest, cuando se vacía la cola de microtasks (onMicrotaskEmpty)", async () => {
+    const win = evaluate();
+    const scope = fakeScope();
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    const steps: number[] = [];
+    win.Promise.resolve()
+      .then(() => steps.push(1))
+      .then(() => steps.push(2))
+      .then(() => steps.push(3));
+
+    await microtasksDrained();
+    expect(steps).toEqual([1, 2, 3]);
+    expect(scope.calls).toBe(1);
+  });
+
+  it("Promise.prototype.then: el digest corre después de que el motor adopta la promesa que devolvió el callback", async () => {
+    // Un hook async de UI-Router devuelve una promesa `$q`: si el digest corre antes de que el motor le encadene sus
+    // handlers (un microtask después), `$q` la ve rechazada y sin handlers ("Possibly unhandled rejection").
+    const win = evaluate();
+    let adopted = false;
+    let adoptedAtDigest: boolean | undefined;
+    const scope = fakeScope();
+    scope.$apply = () => {
+      scope.calls++;
+      adoptedAtDigest = adopted;
+    };
+    (win as unknown as { ɵngjsRootScope: unknown }).ɵngjsRootScope = scope;
+
+    const thenable = {
+      then(resolve: (value: number) => void) {
+        adopted = true;
+        resolve(1);
+      },
+    };
+    win.Promise.resolve().then(() => thenable);
+
+    await microtasksDrained();
+    expect(adoptedAtDigest).toBe(true);
   });
 
   it("addEventListener: dispara $apply después de correr el listener", () => {
