@@ -173,7 +173,9 @@ export interface ModuleWithProviders<T = CompiledClass> {
 
 /** `globalThis.ɵngjsPlatform` — lo deja el build al inicio (solo en una aplicación); `platformBrowserDynamic()` lo devuelve. */
 export interface NgjsPlatform {
-  /** Arma el módulo raíz (`providedIn: "root"` primero, después `moduleType`), monta `bootstrap` y hace `angular.bootstrap`. */
+  /** Arma el módulo raíz (`providedIn: "root"` primero, después `moduleType`), monta `bootstrap`, crea el
+   * injector, espera los initializers (`ɵngjsAppInitializers`) y recién ahí compila el host — lo de `angular.bootstrap`,
+   * con los initializers en el medio. */
   bootstrapModule(moduleType: CompiledClass): Promise<auto.IInjectorService>;
 }
 
@@ -206,7 +208,7 @@ declare global {
   var ɵngjsRootScope: IRootScopeService | undefined;
   /** El `$injector` de la app arrancada — lo usa `inject()` fuera de una construcción. */
   var ɵngjsInjector: auto.IInjectorService | undefined;
-  /** Initializadores registrados por `provideAppInitializer()` antes del bootstrap. */
+  /** Initializadores registrados antes del bootstrap: corren con el injector creado y ANTES de compilar el host. */
   var ɵngjsAppInitializers: ((injector: auto.IInjectorService) => void | Promise<unknown>)[] | undefined;
   /** `> 0` mientras corre `NgZone.runOutsideAngular()`: lo que se programe ahí no dispara digest (los patches). */
   var ɵngjsOutsideAngular: number | undefined;

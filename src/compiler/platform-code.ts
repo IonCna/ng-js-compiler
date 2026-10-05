@@ -54,17 +54,33 @@ export class PlatformCode {
             angular.module(${JSON.stringify(ROOT_MODULE)}, [${JSON.stringify(ROOT_PROVIDERS_MODULE)}, moduleType.ɵmod.id]);
             var host = document.body;
             (moduleType.ɵmod.bootstrap || []).forEach(function (tag) { if (!host.querySelector(tag)) host.appendChild(document.createElement(tag)); });
-            var injector = angular.bootstrap(host, [${JSON.stringify(ROOT_MODULE)}]);
+            // Lo que hace \`angular.bootstrap\` (\`doBootstrap\`), partido en dos: primero el injector (con sus \`.config\`/\`.run\`)
+            // y recién después de los initializers el \`$compile\` del host. Como Angular: \`APP_INITIALIZER\` termina
+            // antes de que exista el primer componente — un componente no ve la app a medio inicializar.
+            var element = angular.element(host);
+            if (element.injector()) throw new Error("bootstrapModule(): el host ya tiene una app arrancada.");
+            var modules = ["ng", ["$provide", function ($provide) { $provide.value("$rootElement", element); }], ${JSON.stringify(ROOT_MODULE)}];
+            // \`angular.reloadWithDebugInfo()\` deja la marca en \`window.name\` y recarga: se respeta igual que \`angular.bootstrap\`.
+            if (/^NG_ENABLE_DEBUG_INFO!/.test(window.name)) {
+              window.name = window.name.replace(/^NG_ENABLE_DEBUG_INFO!/, "");
+              modules.push(["$compileProvider", function ($compileProvider) { $compileProvider.debugInfoEnabled(true); }]);
+            }
+            var injector = angular.injector(modules);
+            element.data("$injector", injector);
             // El patch de ZonePatchesRuntime (setTimeout/addEventListener/Promise.then) necesita ESTE
-            // $rootScope para saber a qué aplicarle $apply — no existe hasta que el bootstrap de verdad corrió.
+            // $rootScope para saber a qué aplicarle $apply — no existe hasta que el injector de verdad se creó.
             globalThis.${ROOT_SCOPE_GLOBAL} = injector.get("$rootScope");
             globalThis.${INJECTOR_GLOBAL} = injector;
             ${PlatformCode.lateRootHook("registerLateRoot")}
             var initializers = globalThis.ɵngjsAppInitializers || [];
             globalThis.ɵngjsAppInitializers = [];
             Promise.all(initializers.map(function (initializer) { return initializer(injector); })).then(function () {
-              resolve(injector);
-            }, reject);
+              injector.invoke(["$rootScope", "$compile", function (scope, compile) {
+                var mount = function () { compile(element)(scope); };
+                if (scope.$$phase) mount(); else scope.$apply(mount);
+              }]);
+              return injector;
+            }).then(resolve, reject);
           } catch (error) { reject(error); }
         });
       });
