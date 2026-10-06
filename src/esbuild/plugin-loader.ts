@@ -21,6 +21,9 @@ import type { Plugin } from "esbuild";
  * cualquier otro.
  *
  * `onScanned`: recibe el escaneo de cada build (ej. `ngjs build` de una librería arma su `LibraryManifest`).
+ *
+ * `prodMode`: la plataforma sale con el debug info de AngularJS apagado (ver `PlatformCode.source`) — lo pide
+ * `ngjs build`; solo aplica a una aplicación.
  */
 export function pluginLoader(
   sourceRoot: string | string[],
@@ -28,6 +31,7 @@ export function pluginLoader(
   fileReplacements: Record<string, string> = {},
   projectType: ProjectType = "application",
   onScanned?: (scanner: ApplicationScanner) => void,
+  prodMode = false,
 ): Plugin {
   return {
     name: "ngjs-plugin-loader",
@@ -37,7 +41,7 @@ export function pluginLoader(
       // solo en una aplicación: una librería no arranca nada (sus servicios root se anotan solos en la cola).
       if (projectType === "application") {
         const { banner } = build.initialOptions;
-        build.initialOptions.banner = { ...banner, js: PlatformCode.banner(banner?.js) };
+        build.initialOptions.banner = { ...banner, js: PlatformCode.banner(banner?.js, prodMode) };
 
         // `ZonePatchesRuntime` parchea `Promise.prototype.then`, pero eso NO intercepta `async/await` nativo
         // (probado en V8 real: cero intercepciones). El código del proyecto ya sale sin `await` nativo

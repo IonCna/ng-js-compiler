@@ -22,11 +22,11 @@ interface PlatformWindow {
  * La plataforma evaluada en una ventana jsdom con AngularJS real y un módulo `app` armado a mano: `<app-root>` anota en
  * `log` cuándo se construye. `moduleType` es lo mínimo que lee `bootstrapModule` de una clase compilada (`ɵmod`).
  */
-function platform(): { win: PlatformWindow; log: string[]; moduleType: object } {
+function platform(prodMode = false): { win: PlatformWindow; log: string[]; moduleType: object } {
   const dom = new JSDOM("<!doctype html><body></body>", { runScripts: "outside-only", pretendToBeVisual: true });
   const win = dom.window as unknown as PlatformWindow;
   win.eval(ANGULAR);
-  win.eval(PlatformCode.source());
+  win.eval(PlatformCode.source(prodMode));
 
   const log: string[] = [];
   win.angular
@@ -97,5 +97,31 @@ describe("PlatformCode: bootstrapModule()", () => {
     await win.ɵngjsPlatform.bootstrapModule(moduleType);
 
     expect(win.name).toBe("ventana");
+  });
+
+  it("prodMode apaga el debug info de AngularJS (sin clases ng-scope); sin él queda prendido", async () => {
+    const dev = platform();
+    await dev.win.ɵngjsPlatform.bootstrapModule(dev.moduleType);
+    expect(dev.win.document.body.classList.contains("ng-scope")).toBe(true);
+
+    const prod = platform(true);
+    await prod.win.ɵngjsPlatform.bootstrapModule(prod.moduleType);
+    expect(prod.win.document.body.classList.contains("ng-scope")).toBe(false);
+    expect(prod.win.document.querySelector("app-root")?.textContent).toBe("hola");
+  });
+
+  it("prodMode: angular.reloadWithDebugInfo() lo vuelve a prender, y un .config de la app también", async () => {
+    const reloaded = platform(true);
+    reloaded.win.name = "NG_ENABLE_DEBUG_INFO!";
+    await reloaded.win.ɵngjsPlatform.bootstrapModule(reloaded.moduleType);
+    expect(reloaded.win.document.body.classList.contains("ng-scope")).toBe(true);
+
+    const configured = platform(true);
+    configured.win.angular.module("app").config([
+      "$compileProvider",
+      ($compileProvider: { debugInfoEnabled(enabled: boolean): void }) => $compileProvider.debugInfoEnabled(true),
+    ]);
+    await configured.win.ɵngjsPlatform.bootstrapModule(configured.moduleType);
+    expect(configured.win.document.body.classList.contains("ng-scope")).toBe(true);
   });
 });

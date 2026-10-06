@@ -33,8 +33,18 @@ export const ROOT_DEFAULTS = "ɵrootDefaults";
  * archivo.
  */
 export class PlatformCode {
-  /** El código de la plataforma, JS plano; lo único que lee es lo que el compilador estampó (`ɵmod`, `ɵfac`). */
-  static source(): string {
+  /**
+   * El código de la plataforma, JS plano; lo único que lee es lo que el compilador estampó (`ɵmod`, `ɵfac`).
+   *
+   * `prodMode` (solo `ngjs build`): apaga el debug info de AngularJS (`debugInfoEnabled(false)`) — sin clases
+   * `ng-scope`/`ng-binding` ni `.scope()` por elemento, menos trabajo al enlazar. Va ANTES del módulo de la app (un
+   * `.config` propio lo puede volver a prender) y `angular.reloadWithDebugInfo()` sigue ganando. En `serve`/`test`
+   * queda prendido: el runtime de HMR lee `.scope()`/`.isolateScope()`.
+   */
+  static source(prodMode = false): string {
+    const prodConfig = prodMode
+      ? `["$compileProvider", function ($compileProvider) { $compileProvider.debugInfoEnabled(false); }], `
+      : "";
     return `(function () {
   if (globalThis.${PLATFORM_GLOBAL}) return;
   globalThis.${ROOT_PROVIDERS_GLOBAL} = globalThis.${ROOT_PROVIDERS_GLOBAL} || [];
@@ -59,7 +69,7 @@ export class PlatformCode {
             // antes de que exista el primer componente — un componente no ve la app a medio inicializar.
             var element = angular.element(host);
             if (element.injector()) throw new Error("bootstrapModule(): el host ya tiene una app arrancada.");
-            var modules = ["ng", ["$provide", function ($provide) { $provide.value("$rootElement", element); }], ${JSON.stringify(ROOT_MODULE)}];
+            var modules = ["ng", ["$provide", function ($provide) { $provide.value("$rootElement", element); }], ${prodConfig}${JSON.stringify(ROOT_MODULE)}];
             // \`angular.reloadWithDebugInfo()\` deja la marca en \`window.name\` y recarga: se respeta igual que \`angular.bootstrap\`.
             if (/^NG_ENABLE_DEBUG_INFO!/.test(window.name)) {
               window.name = window.name.replace(/^NG_ENABLE_DEBUG_INFO!/, "");
@@ -157,8 +167,8 @@ ${ZonePatchesRuntime.source()}`;
   }
 
   /** esbuild: la plataforma antepuesta al `banner.js` que ya tuviera el build. */
-  static banner(existing: string | undefined): string {
-    return [PlatformCode.source(), existing].filter(Boolean).join("\n");
+  static banner(existing: string | undefined, prodMode = false): string {
+    return [PlatformCode.source(prodMode), existing].filter(Boolean).join("\n");
   }
 
   /** Vite: `<script>` clásico al principio del `<head>` — corre antes que los `<script type="module">` de la app. */
