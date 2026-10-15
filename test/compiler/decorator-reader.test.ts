@@ -53,6 +53,32 @@ describe("DecoratorReader.read", () => {
     expect(result).toBe(`// configuración del módulo — ñandú\n\nexport class FooService {\n  constructor( private http: unknown) {}\n}\n`);
   });
 
+  // `ngjs serve` vuelve a escanear el proyecto con cada cambio, y un archivo se lee también al emitirse y para las
+  // declaraciones de los templates: con el mismo código no se vuelve a parsear.
+  it("el mismo código se lee una vez: la segunda lectura da la misma metadata y no invalida lo derivado del store", async () => {
+    const code = `@Component({ selector: "app-cached" }) export class CachedComponent {}`;
+    const first = await DecoratorReader.readWithMap(code, "cached.component.ts");
+    const [metadata] = MetadataStore.get("cached.component.ts");
+    const derived = MetadataStore.memo("test.derived", () => ({}));
+
+    const second = await DecoratorReader.readWithMap(code, "cached.component.ts");
+
+    expect(second).toBe(first);
+    expect(MetadataStore.get("cached.component.ts")[0]).toBe(metadata);
+    expect(MetadataStore.memo("test.derived", () => ({}))).toBe(derived);
+  });
+
+  it("código distinto en el mismo archivo se vuelve a leer", async () => {
+    await DecoratorReader.read(`@Component({ selector: "app-a" }) export class ChangingComponent {}`, "changing.component.ts");
+    await DecoratorReader.read(`@Component({ selector: "app-b" }) export class ChangingComponent {}`, "changing.component.ts");
+
+    const [metadata] = MetadataStore.get("changing.component.ts") as [ComponentMetadata];
+    expect(metadata.options).toMatchObject({ selector: "app-b" });
+
+    await DecoratorReader.read("export class ChangingComponent {}", "changing.component.ts");
+    expect(MetadataStore.get("changing.component.ts")).toEqual([]);
+  });
+
   describe("DI de Angular 16 resuelta en build", () => {
     it("forwardRef(() => X) se desenvuelve en providers, deps, useClass, @Inject() e inject()", async () => {
       const code = `
