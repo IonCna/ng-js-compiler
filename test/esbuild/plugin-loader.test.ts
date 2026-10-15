@@ -106,6 +106,31 @@ describe("pluginLoader", () => {
     expect(result.outputFiles[0]!.text).not.toContain("ɵngjsPlatform");
   });
 
+  // `ngjs build` con `index.html` la carga una vez aparte: el `banner` se repetiría en cada chunk, sin minificar.
+  it("con platformBanner: false no repite la plataforma en los chunks, pero sigue bajando async/await", async () => {
+    const lazy = join(dir, "lazy.ts");
+    await writeFile(lazy, "export async function load(x) { return await x; }\n");
+    const file = join(dir, "entry.ts");
+    await writeFile(file, `export const lazy = () => import("./lazy.ts");`);
+
+    const result = await esbuild.build({
+      entryPoints: [file],
+      bundle: true,
+      splitting: true,
+      outdir: join(dir, "out"),
+      write: false,
+      format: "esm",
+      target: "es2022",
+      plugins: [pluginLoader(dir, [], {}, "application", undefined, false, false)],
+    });
+
+    expect(result.outputFiles.length).toBe(2);
+    for (const output of result.outputFiles) {
+      expect(output.text).not.toContain("ɵngjsPlatform");
+      expect(output.text).not.toMatch(/\bawait\b/);
+    }
+  });
+
   it("fileReplacements redirige a otro archivo y ese archivo también pasa por los transforms", async () => {
     const original = join(dir, "environment.ts");
     const replacement = join(dir, "environment.prod.ts");

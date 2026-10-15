@@ -24,6 +24,10 @@ import type { Plugin } from "esbuild";
  *
  * `prodMode`: la plataforma sale con el debug info de AngularJS apagado (ver `PlatformCode.source`) — lo pide
  * `ngjs build`; solo aplica a una aplicación.
+ *
+ * `platformBanner: false`: la plataforma no va en el `banner` porque quien construye la carga aparte, una vez, antes
+ * del bundle (`ngjs build` con `index.html`: `<script defer>` antes del entry). El `banner` de esbuild se repite en
+ * cada archivo de salida — con `splitting`, en cada chunk lazy — y no se minifica.
  */
 export function pluginLoader(
   sourceRoot: string | string[],
@@ -32,6 +36,7 @@ export function pluginLoader(
   projectType: ProjectType = "application",
   onScanned?: (scanner: ApplicationScanner) => void,
   prodMode = false,
+  platformBanner = true,
 ): Plugin {
   return {
     name: "ngjs-plugin-loader",
@@ -41,7 +46,7 @@ export function pluginLoader(
       // solo en una aplicación: una librería no arranca nada (sus servicios root se anotan solos en la cola).
       if (projectType === "application") {
         const { banner } = build.initialOptions;
-        build.initialOptions.banner = { ...banner, js: PlatformCode.banner(banner?.js, prodMode) };
+        if (platformBanner) build.initialOptions.banner = { ...banner, js: PlatformCode.banner(banner?.js, prodMode) };
 
         // `ZonePatchesRuntime` parchea `Promise.prototype.then`, pero eso NO intercepta `async/await` nativo
         // (probado en V8 real: cero intercepciones). El código del proyecto ya sale sin `await` nativo
