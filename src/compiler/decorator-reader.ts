@@ -50,6 +50,20 @@ type ModuleExport = NonNullable<NgModuleMetadata["exports"]>[number];
 /** Inputs/outputs/host de la clase — los `providers` se leen aparte, del objeto del decorador. */
 type ClassBindings = Omit<BindingsMetadata, "providers" | "hostDirectives">;
 
+/** Las clases decoradas de un archivo y los spans de sus decoradores. */
+interface ParsedFile {
+  metadata: DecoratorMetadata[];
+  stripSpans: SourceEdit[];
+}
+
+/** Una lectura de un archivo (`DecoratorReader.readFile`): `parsed` vacío si no tiene clases decoradas. */
+interface FileRead {
+  code: string;
+  parsed: ParsedFile | undefined;
+  /** El código sin decoradores, con su source map — se arma la primera vez que se emite. */
+  output?: TransformOutput | undefined;
+}
+
 /** Lo que cada clase del archivo necesita para resolver nombres de DI (`TokenName`). */
 interface FileContext {
   path: string;
@@ -156,23 +170,39 @@ export class DecoratorReader {
 
   /** `read()` con el source map de lo que sacó (ver `decoratorReaderTransform`). */
   static async readWithMap(code: string, path: string): Promise<TransformOutput | undefined> {
-    const parsed = await DecoratorReader.parseFile(code, path);
-    if (!parsed) {
+    const read = await DecoratorReader.readFile(code, path);
+    if (!read.parsed) {
       // Se le sacaron los decoradores (o nunca tuvo): que no quede la metadata de una lectura anterior.
       MetadataStore.delete(path);
       return undefined;
     }
 
-    MetadataStore.set(path, parsed.metadata);
-    return DecoratorReader.stripSpans(code, path, parsed.stripSpans);
+    MetadataStore.set(path, read.parsed.metadata);
+    read.output ??= DecoratorReader.stripSpans(code, path, read.parsed.stripSpans);
+    return read.output;
   }
 
   /** La metadata de las clases decoradas de un archivo, sin guardarla en `MetadataStore` (ver `LibraryManifest.fromSources`). */
   static async metadataOf(code: string, path: string): Promise<DecoratorMetadata[]> {
-    return (await DecoratorReader.parseFile(code, path))?.metadata ?? [];
+    return (await DecoratorReader.readFile(code, path)).parsed?.metadata ?? [];
   }
 
-  private static async parseFile(code: string, path: string): Promise<{ metadata: DecoratorMetadata[]; stripSpans: SourceEdit[] } | undefined> {
+  /**
+   * La última lectura de cada archivo, reusada mientras su código sea el mismo. Un archivo se lee varias veces con el
+   * mismo código — el escaneo, la emisión, las declaraciones de `ng-js-template-compiler` — y en `ngjs serve` cada
+   * cambio vuelve a escanear el proyecto entero: parsearlo todo de nuevo era la mayor parte de cada recarga.
+   */
+  private static readonly reads = new Map<string, FileRead>();
+
+  private static async readFile(code: string, path: string): Promise<FileRead> {
+    const cached = DecoratorReader.reads.get(path);
+    if (cached?.code === code) return cached;
+    const read: FileRead = { code, parsed: await DecoratorReader.parseFile(code, path) };
+    DecoratorReader.reads.set(path, read);
+    return read;
+  }
+
+  private static async parseFile(code: string, path: string): Promise<ParsedFile | undefined> {
     if (!/@(Component|Directive|Pipe|Service|Injectable|NgModule|Input|Output|HostBinding|HostListener|ViewChild|ViewChildren|ContentChild|ContentChildren)\s*\(/.test(code)) {
       return undefined;
     }

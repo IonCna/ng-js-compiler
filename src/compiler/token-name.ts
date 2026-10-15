@@ -34,29 +34,36 @@ export class TokenName {
     return TokenName.packageRootOf(path).name;
   }
 
-  /** El `package.json` más cercano subiendo desde `path` (archivo): su `name` y su carpeta. */
+  /**
+   * El `package.json` más cercano subiendo desde `path` (archivo): su `name` y su carpeta. Cada carpeta recorrida
+   * queda en caché, también cuando el recorrido corta en una ya conocida: `ModuleWriter` pide el paquete de cada
+   * clase del proyecto en cada `@NgModule`, y sin eso cada pedido volvía a subir con `existsSync`.
+   */
   private static packageRootOf(path: string): { name: string; dir: string } {
-    const start = dirname(resolve(path));
-    let dir = start;
+    const visited: string[] = [];
+    let dir = dirname(resolve(path));
 
     while (true) {
       const cached = TokenName.packageByDir.get(dir);
-      if (cached) return cached;
+      if (cached) return TokenName.remember(visited, cached);
 
+      visited.push(dir);
       const manifest = join(dir, "package.json");
       if (existsSync(manifest)) {
         const { name } = JSON.parse(readFileSync(manifest, "utf8")) as { name?: string };
         if (!name) throw new Error(`TokenName: "${manifest}" no tiene "name" — hace falta para los nombres de DI.`);
-        const root = { name, dir };
-        TokenName.packageByDir.set(start, root);
-        TokenName.packageByDir.set(dir, root);
-        return root;
+        return TokenName.remember(visited, { name, dir });
       }
 
       const parent = dirname(dir);
       if (parent === dir) throw new Error(`TokenName: no hay package.json subiendo desde "${path}" — hace falta para los nombres de DI.`);
       dir = parent;
     }
+  }
+
+  private static remember(dirs: string[], root: { name: string; dir: string }): { name: string; dir: string } {
+    for (const dir of dirs) TokenName.packageByDir.set(dir, root);
+    return root;
   }
 
   /**

@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApplicationScanner } from "@/compiler/application-scanner.ts";
+import { ElementInstances } from "@/compiler/element-instances.ts";
 import { MetadataStore } from "@/metadata/metadata-store.ts";
 
 describe("ApplicationScanner", () => {
@@ -284,6 +285,55 @@ export class HighlightDirective {}
     const withProviders = new ApplicationScanner();
     await withProviders.scan(dir);
     expect(withProviders.hasScopedProviders()).toBe(true);
+  });
+
+  // `ModuleWriter` lo pide en cada `@NgModule`: recorrerlo cada vez costaba segundos por módulo en un proyecto grande.
+  it("usesElementInstances(): se calcula una vez por escaneo y se recalcula en el siguiente", async () => {
+    await writeFile(
+      join(dir, "tabs.component.ts"),
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-tabs", template: "" })
+export class TabsComponent {}
+`,
+      "utf8",
+    );
+    const tab = join(dir, "tab.component.ts");
+    await writeFile(
+      tab,
+      `import { Component } from "ngjs-core";
+import { TabsComponent } from "./tabs.component.ts";
+
+@Component({ selector: "app-tab", template: "" })
+export class TabComponent {
+  constructor(tabs: TabsComponent) {}
+}
+`,
+      "utf8",
+    );
+
+    const scanner = new ApplicationScanner();
+    await scanner.scan(dir);
+    const namesFor = vi.spyOn(ElementInstances, "namesFor");
+
+    expect(scanner.within(() => scanner.usesElementInstances())).toBe(true);
+    const calls = namesFor.mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(scanner.within(() => scanner.usesElementInstances())).toBe(true);
+    expect(namesFor).toHaveBeenCalledTimes(calls);
+
+    await writeFile(
+      tab,
+      `import { Component } from "ngjs-core";
+
+@Component({ selector: "app-tab", template: "" })
+export class TabComponent {}
+`,
+      "utf8",
+    );
+    await scanner.scan(dir);
+    expect(scanner.within(() => scanner.usesElementInstances())).toBe(false);
+    namesFor.mockRestore();
   });
 
   it("dos clases decoradas con el mismo nombre en el proyecto es error (chocarían en el nombre de DI)", async () => {

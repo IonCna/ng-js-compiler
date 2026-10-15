@@ -33,6 +33,8 @@ export interface ScanOptions {
  */
 export class ApplicationScanner {
   private readonly nodes = new Map<string, ApplicationNode>();
+  /** `usesElementInstances()` de este escaneo (`undefined` hasta que alguien lo pide). */
+  private elementInstances: boolean | undefined;
   /** La metadata de esta compilación — el escaneo y la emisión (`createNgjsCompilerTransforms`) corren contra ella. */
   readonly metadata = MetadataStore.scope();
 
@@ -50,6 +52,7 @@ export class ApplicationScanner {
   }
 
   private async scanInScope(sourceRoot: string | string[], options: ScanOptions): Promise<void> {
+    this.elementInstances = undefined;
     const roots = Array.isArray(sourceRoot) ? sourceRoot : [sourceRoot];
     const files = (await Promise.all(roots.map((root) => ApplicationScanner.listTsFiles(root)))).flat();
 
@@ -125,8 +128,14 @@ export class ApplicationScanner {
   /**
    * Gate de todo el proyecto para `ElementInstances.lazyControllerSource`: alguna clase elemento inyecta una
    * directiva/componente (constructor o `inject()`, también heredados). Corre dentro del scope del escaneo (`within`).
+   * Se calcula una vez por escaneo: la respuesta es del proyecto entero y `ModuleWriter` la pide en cada `@NgModule`.
    */
   usesElementInstances(): boolean {
+    this.elementInstances ??= this.findElementInstances();
+    return this.elementInstances;
+  }
+
+  private findElementInstances(): boolean {
     for (const { metadata } of this.nodes.values()) {
       if (metadata.kind !== "component" && metadata.kind !== "directive") continue;
       const tokens = [...ClassHierarchy.constructorOf(metadata).constructorTokens, ...ClassHierarchy.injectsByClass(metadata).flatMap(({ tokens: list }) => list.map(({ token }) => token))];

@@ -25,18 +25,34 @@ export class ElementInstances {
    * `undefined` si `token` no es una clase elemento (entonces es una dep de DI común).
    */
   static namesFor(token: string): string[] | undefined {
-    const names = new Set<string>();
-    for (const [, metadata] of MetadataStore.entries()) {
+    const names = MetadataStore.memo("ElementInstances.namesByToken", ElementInstances.namesByToken).get(token);
+    return names && [...names];
+  }
+
+  /**
+   * Token → nombres de registro, de todo el proyecto en una pasada. `DecoratorWriter` pregunta por cada dependencia
+   * de cada componente: recorrer el proyecto en cada pregunta costaba segundos por archivo.
+   */
+  private static namesByToken(): Map<string, Set<string>> {
+    const entries = MetadataStore.entries();
+    const pathOf = new Map(entries.flatMap(([path, metadata]) => metadata.map((member) => [member, path] as const)));
+    const index = new Map<string, Set<string>>();
+
+    for (const [, metadata] of entries) {
       for (const candidate of metadata) {
         if (candidate.kind !== "component" && candidate.kind !== "directive") continue;
         const { selector } = candidate.options as { selector?: string };
         if (!selector) continue; // `@Directive()` abstracta: nunca está en un elemento
-        const tokens = ClassHierarchy.chain(candidate).map((member) => ElementInstances.tokenOf(member));
-        if (!tokens.includes(token)) continue;
-        for (const parsed of SelectorParser.parse(selector)) names.add(parsed.registrationName);
+        const names = SelectorParser.parse(selector).map((parsed) => parsed.registrationName);
+        for (const member of ClassHierarchy.chain(candidate)) {
+          const token = ElementInstances.tokenOf(member, pathOf.get(member) ?? "");
+          const set = index.get(token) ?? new Set<string>();
+          for (const name of names) set.add(name);
+          index.set(token, set);
+        }
       }
     }
-    return names.size ? [...names] : undefined;
+    return index;
   }
 
   /** La expresión que da la instancia al construir (dentro del `ɵfac` de un elemento, con `$element` a mano). */
@@ -109,8 +125,7 @@ export class ElementInstances {
   }
 
   /** El mismo nombre de DI que `TokenName` le da a la clase en cada archivo que la usa como tipo. */
-  private static tokenOf(metadata: ClassMetadata): string {
-    const path = MetadataStore.entries().find(([, list]) => list.includes(metadata))?.[0] ?? "";
+  private static tokenOf(metadata: ClassMetadata, path: string): string {
     return metadata.local ? TokenName.local(metadata.className, path) : TokenName.of(metadata.className, TokenName.packageOf(path));
   }
 }

@@ -17,6 +17,8 @@ export type MetadataScope = Map<string, DecoratorMetadata[]>;
 export class MetadataStore {
   private static readonly fallback: MetadataScope = new Map();
   private static readonly current = new AsyncLocalStorage<MetadataScope>();
+  /** Lo derivado de cada scope (`memo`): se descarta en cuanto el scope cambia. */
+  private static readonly memos = new WeakMap<MetadataScope, Map<string, unknown>>();
 
   private static get store(): MetadataScope {
     return MetadataStore.current.getStore() ?? MetadataStore.fallback;
@@ -33,12 +35,28 @@ export class MetadataStore {
   }
 
   static set(path: string, metadata: DecoratorMetadata[]): void {
+    // La misma lectura otra vez (el archivo no cambió): lo derivado sigue valiendo.
+    if (MetadataStore.store.get(path) === metadata) return;
     MetadataStore.store.set(path, metadata);
+    MetadataStore.memos.delete(MetadataStore.store);
   }
 
   /** El archivo ya no tiene clases decoradas: sin esto, la emisión seguiría viendo las de antes. */
   static delete(path: string): void {
     MetadataStore.store.delete(path);
+    MetadataStore.memos.delete(MetadataStore.store);
+  }
+
+  /**
+   * Un dato derivado de todo el scope (un índice), calculado una vez mientras el scope no cambie. Lo que recorre el
+   * proyecto entero por cada clase o dependencia que se emite hace cuadrático el costo de cada archivo.
+   */
+  static memo<T>(key: string, compute: () => T): T {
+    const scope = MetadataStore.store;
+    let memos = MetadataStore.memos.get(scope);
+    if (!memos) MetadataStore.memos.set(scope, (memos = new Map()));
+    if (!memos.has(key)) memos.set(key, compute());
+    return memos.get(key) as T;
   }
 
   static get(path: string): DecoratorMetadata[] {
@@ -68,5 +86,6 @@ export class MetadataStore {
 
   static clear(): void {
     MetadataStore.store.clear();
+    MetadataStore.memos.delete(MetadataStore.store);
   }
 }
