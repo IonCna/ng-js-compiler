@@ -137,8 +137,9 @@ export class DecoratorWriter {
     // Flags (`@Optional()`/`@Self()`/…): se pide `ɵresolve` y se le pasa el token al construir (ver `ResolveDependency`).
     // En `@Component`/`@Directive` se avisa que es una clase de elemento (cambia `self` sin injector de elemento).
     const isElement = metadata.kind === "component" || metadata.kind === "directive";
-    const depName = (token: string, flags: InjectFlags | undefined) => ResolveDependency.depName(token, flags);
-    const value = (param: string, token: string, flags: InjectFlags | undefined) => ResolveDependency.value(param, token, flags, isElement);
+    const depName = (token: string, flags: InjectFlags | undefined, lazy?: boolean) => ResolveDependency.depName(token, flags, lazy);
+    const value = (param: string, token: string, flags: InjectFlags | undefined, lazy?: boolean) =>
+      ResolveDependency.value(param, token, flags, isElement, lazy);
     // `@Attribute("x")` no es DI: se lee del host (`$element`, que `@Component`/`@Directive` siempre reciben).
     const attributeOf = (index: number) => constructorAttributes[index] ?? null;
     // Una directiva/componente como token no es DI: se lee del elemento (`ElementInstances`) — solo en un elemento.
@@ -161,7 +162,7 @@ export class DecoratorWriter {
     const injectParams = injectedDi.map((_, index) => `i${index}`);
     const deps = [
       ...diIndexes.map((index) => depName(constructorTokens[index]!, constructorFlags[index])),
-      ...injectedDi.map(({ token, flags }) => depName(token, flags)),
+      ...injectedDi.map(({ token, flags, lazy }) => depName(token, flags, lazy)),
     ];
     const inherited = externalHops !== undefined;
     const params = [...(inherited ? ["ɵsuper"] : []), ...ctorParams, ...injectParams].join(", ");
@@ -169,9 +170,11 @@ export class DecoratorWriter {
       const statement = inherited ? `${assign}ɵsuper();` : `${assign}new ${InheritedFactory.target(className)}(${ctorArgs});`;
       if (!injectTokens.length) return statement;
       let next = 0;
-      const injectedValue = ({ token, flags }: InjectDep) => {
+      const injectedValue = ({ token, flags, lazy }: InjectDep) => {
         const names = instanceNames(token);
-        return names ? ElementInstances.value(names, flags, metadata.kind === "component") : value(`i${next++}`, token, flags);
+        if (!names) return value(`i${next++}`, token, flags, lazy);
+        const instance = ElementInstances.value(names, flags, metadata.kind === "component");
+        return lazy ? `function () { return ${instance}; }` : instance;
       };
       const byOwner = Object.fromEntries(injects.map(({ owner, tokens }) => [owner, tokens.map(injectedValue)]));
       return InjectedValues.around(byOwner, statement);

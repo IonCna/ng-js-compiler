@@ -120,6 +120,47 @@ const INJECT_OPTION_KEYS = new Set<string>(["optional", "self", "skipSelf", "hos
 /** Nodos cuyo cuerpo NO corre durante la construcción — un `inject()` adentro se deja para runtime. */
 const NESTED_SCOPES = new Set(["ArrowFunctionExpression", "FunctionExpression", "FunctionDeclaration", "ClassExpression", "ClassDeclaration"]);
 
+/** Operadores cuyo lado derecho no siempre se evalúa (`a && inject(X)`, `x ??= inject(Y)`). */
+const SHORT_CIRCUIT = new Set(["&&", "||", "??", "&&=", "||=", "??="]);
+
+/**
+ * Los hijos de `node` que no siempre se evalúan cuando `node` sí: las ramas de un `if`/ternario/`switch`, el lado
+ * derecho de un corto circuito, el cuerpo de un ciclo, el `catch` y lo que sigue a `?.`. `undefined` si todos corren.
+ */
+function conditionalChildren(node: { type?: string } & Record<string, unknown>): Set<unknown> | undefined {
+  switch (node.type) {
+    case "ConditionalExpression":
+    case "IfStatement":
+      return new Set([node.consequent, node.alternate]);
+    case "BinaryExpression":
+    case "AssignmentExpression":
+      return SHORT_CIRCUIT.has(String(node.operator)) ? new Set([node.right]) : undefined;
+    case "SwitchStatement":
+      return new Set([node.cases]);
+    case "TryStatement":
+      return new Set([node.handler]);
+    case "WhileStatement":
+    case "DoWhileStatement":
+    case "ForStatement":
+    case "ForInStatement":
+    case "ForOfStatement":
+    case "OptionalChainingExpression":
+      return new Set(Object.values(node));
+    default:
+      return undefined;
+  }
+}
+
+/** Si `node` puede cortar la construcción (`return` / `throw`), sin entrar a funciones anidadas. */
+function mayExit(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (Array.isArray(node)) return node.some(mayExit);
+  const type = (node as { type?: string }).type;
+  if (type && NESTED_SCOPES.has(type)) return false;
+  if (type === "ReturnStatement" || type === "ThrowStatement") return true;
+  return Object.values(node).some(mayExit);
+}
+
 /** No son decoradores — se detectan por nombre de método (como Angular real: se implementan por convención). Ver `LifecycleWiring`. */
 const LIFECYCLE_HOOK_NAMES = new Set([
   "ngOnChanges",
@@ -1125,14 +1166,24 @@ export class DecoratorReader {
     const injectTokens: InjectDep[] = [];
     const imports = new Set<string>();
 
-    const visit = (node: unknown): void => {
+    // `conditional`: el `inject()` puede no ejecutarse; queda perezoso (`InjectDep.lazy`) en vez de resolverse antes del `new`.
+    const visit = (node: unknown, conditional = false): void => {
       if (!node || typeof node !== "object") return;
       if (Array.isArray(node)) {
-        for (const child of node) visit(child);
+        for (const child of node) visit(child, conditional);
         return;
       }
       const typed = node as { type?: string };
       if (typed.type && NESTED_SCOPES.has(typed.type)) return;
+      if (typed.type === "BlockStatement" || typed.type === "FunctionBody") {
+        // Lo que sigue a un `return`/`throw` posible ya no corre siempre.
+        let exited = conditional;
+        for (const statement of (typed as { stmts: unknown[] }).stmts) {
+          visit(statement, exited);
+          exited ||= mayExit(statement);
+        }
+        return;
+      }
       if (typed.type === "CallExpression" && DecoratorReader.isInjectCall(typed as Expression, context)) {
         const call = typed as Expression & { type: "CallExpression" };
         const read = DecoratorReader.injectArguments(call, owner, context);
@@ -1142,11 +1193,12 @@ export class DecoratorReader {
         }
         // En una clase (no en un `useFactory`, que se copia a otro archivo) el `inject()` original queda de respaldo.
         const fallback = key === InjectedValues.FACTORY ? undefined : DecoratorReader.source(call, context);
-        edits.push({ ...call.span, replacement: InjectedValues.ref(key, injectTokens.length, fallback) });
-        injectTokens.push({ token: read.token, flags: read.flags });
+        edits.push({ ...call.span, replacement: InjectedValues.ref(key, injectTokens.length, fallback, conditional) });
+        injectTokens.push({ token: read.token, flags: read.flags, ...(conditional ? { lazy: true } : {}) });
         return;
       }
-      for (const value of Object.values(node)) visit(value);
+      const branches = conditionalChildren(typed as { type?: string } & Record<string, unknown>);
+      for (const value of Object.values(node)) visit(value, conditional || (branches?.has(value) ?? false));
     };
 
     for (const root of roots) visit(root);

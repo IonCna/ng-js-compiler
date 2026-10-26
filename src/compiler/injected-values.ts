@@ -14,9 +14,10 @@ export class InjectedValues {
    * de una construcción por `ɵfac` — `new Clase()` dentro de `runInInjectionContext()`/`TestBed.runInInjectionContext()`,
    * como en Angular — se usa el `inject()` de runtime.
    */
-  static ref(owner: string, index: number, fallback?: string): string {
+  static ref(owner: string, index: number, fallback?: string, lazy = false): string {
     const key = JSON.stringify(owner);
-    const value = `${InjectedValues.GLOBAL}[${key}][${index}]`;
+    // Perezoso (`InjectDep.lazy`): el valor es una función que lo resuelve al ejecutarse el `inject()`.
+    const value = `${InjectedValues.GLOBAL}[${key}][${index}]${lazy ? "()" : ""}`;
     if (fallback === undefined) return value;
     return `(${InjectedValues.GLOBAL} && ${InjectedValues.GLOBAL}[${key}] ? ${value} : ${fallback})`;
   }

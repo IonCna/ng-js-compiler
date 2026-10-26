@@ -279,6 +279,35 @@ describe("DecoratorReader.read", () => {
       expect(metadata.injectTokens).toEqual([{ token: TokenName.of("ElementRef", "ngjs-core"), flags: {} }]);
     });
 
+    it("lo que no siempre corre (rama, corto circuito, ciclo, catch, después de un return) queda perezoso: se resuelve al ejecutarse", async () => {
+      const code = `
+        @Injectable()
+        export class FooService {
+          private always = inject(Always);
+          private session = this.mode === "contract" ? inject(Session) : null;
+          private fallback = this.cached ?? inject(Fallback);
+          constructor() {
+            if (this.ready) { this.a = inject(InIf); }
+            for (const item of this.items) this.b = inject(InLoop);
+            try { this.c = inject(InTry); } catch { this.d = inject(InCatch); }
+            this.e = inject(BeforeReturn);
+            if (this.done) return;
+            this.f = inject(AfterReturn);
+          }
+        }
+      `;
+
+      const result = await DecoratorReader.read(code, "foo.service.ts");
+      const [metadata] = MetadataStore.get("foo.service.ts") as [ServiceMetadata];
+
+      const lazy = metadata.injectTokens.filter((dep) => dep.lazy).map((dep) => dep.token);
+      const eager = metadata.injectTokens.filter((dep) => !dep.lazy).map((dep) => dep.token);
+      expect(eager).toEqual(["Always", "InTry", "BeforeReturn"].map(own));
+      expect(lazy).toEqual(["Session", "Fallback", "InIf", "InLoop", "InCatch", "AfterReturn"].map(own));
+      // El valor perezoso es una función: se llama donde estaba el `inject()`.
+      expect(result).toContain('this.mode === "contract" ? (globalThis.ɵngjsInjected && globalThis.ɵngjsInjected["FooService"] ? globalThis.ɵngjsInjected["FooService"][1]() : inject(Session)) : null');
+    });
+
     it("lo que no corre durante la construcción queda intacto: función anidada, método, campo static", async () => {
       const code = `
         @Injectable()

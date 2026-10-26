@@ -120,7 +120,7 @@ export class ApplicationScanner {
             ? [metadata.recipe].filter((recipe): recipe is ProviderMetadata => recipe !== undefined)
             : [];
       if (providers.some(ApplicationScanner.providerUsesFlags)) return true;
-      if (metadata.constructorFlags.some(ResolveDependency.hasFlags) || metadata.injectTokens.some((injected) => ResolveDependency.hasFlags(injected.flags))) return true;
+      if (metadata.constructorFlags.some(ResolveDependency.hasFlags) || metadata.injectTokens.some((injected) => ResolveDependency.needsResolver(injected.flags, injected.lazy))) return true;
     }
     return false;
   }
@@ -149,7 +149,8 @@ export class ApplicationScanner {
     if (provider.kind === "class" || provider.kind === "useValue" || provider.kind === "useExisting") return false;
     return Boolean(
       provider.depFlags?.some(ResolveDependency.hasFlags) ||
-        (provider.kind === "useFactory" && provider.injectTokens?.some((injected) => ResolveDependency.hasFlags(injected.flags))),
+        (provider.kind === "useFactory" &&
+          provider.injectTokens?.some((injected) => ResolveDependency.needsResolver(injected.flags, injected.lazy))),
     );
   }
 

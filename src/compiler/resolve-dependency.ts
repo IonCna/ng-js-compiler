@@ -19,16 +19,25 @@ export class ResolveDependency {
     return Boolean(flags && (flags.optional || flags.self || flags.skipSelf || flags.host));
   }
 
-  /** Nombre de la anotación para una dep: el token tal cual, o `ɵresolve` si lleva flags. */
-  static depName(token: string, flags: InjectFlags | undefined): string {
-    return JSON.stringify(ResolveDependency.hasFlags(flags) ? ResolveDependency.TOKEN : token);
+  /** Se pide como `ɵresolve`: lleva flags o es un `inject()` perezoso (`InjectDep.lazy`). */
+  static needsResolver(flags: InjectFlags | undefined, lazy = false): boolean {
+    return lazy || ResolveDependency.hasFlags(flags);
   }
 
-  /** El valor al construir: el parámetro tal cual, o `param("Token", {flags}[, true])` si lleva flags. */
-  static value(param: string, token: string, flags: InjectFlags | undefined, element = false): string {
-    if (!ResolveDependency.hasFlags(flags)) return param;
-    const set = Object.fromEntries(Object.entries(flags!).filter(([, on]) => on));
-    return `${param}(${[JSON.stringify(token), JSON.stringify(set), ...(element ? ["true"] : [])].join(", ")})`;
+  /** Nombre de la anotación para una dep: el token tal cual, o `ɵresolve` si lleva flags o es perezosa. */
+  static depName(token: string, flags: InjectFlags | undefined, lazy = false): string {
+    return JSON.stringify(ResolveDependency.needsResolver(flags, lazy) ? ResolveDependency.TOKEN : token);
+  }
+
+  /**
+   * El valor al construir: el parámetro tal cual, o `param("Token", {flags}[, true])` si lleva flags. Perezosa, una
+   * función que hace esa llamada: se resuelve recién cuando el `inject()` se ejecuta (`InjectedValues.ref(…, lazy)`).
+   */
+  static value(param: string, token: string, flags: InjectFlags | undefined, element = false, lazy = false): string {
+    if (!ResolveDependency.needsResolver(flags, lazy)) return param;
+    const set = Object.fromEntries(Object.entries(flags ?? {}).filter(([, on]) => on));
+    const call = `${param}(${[JSON.stringify(token), JSON.stringify(set), ...(element ? ["true"] : [])].join(", ")})`;
+    return lazy ? `function () { return ${call}; }` : call;
   }
 
   /** Fragmento para la cadena `ɵangular.module(...)` (o el módulo raíz de la plataforma): `ɵresolve` contra el `$injector` de la app. */

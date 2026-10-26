@@ -19,6 +19,11 @@ export interface InjectFlags {
 export interface InjectDep {
   token: string;
   flags: InjectFlags;
+  /**
+   * El `inject()` no siempre corre (rama de un `if` o de un ternario, lado derecho de `&&`/`||`/`??`, después de un
+   * `return` posible…): como en Angular, se resuelve cuando se ejecuta, con `ɵresolve`, y no antes de construir.
+   */
+  lazy?: boolean;
 }
 
 /**

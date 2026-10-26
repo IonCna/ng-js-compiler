@@ -21,7 +21,7 @@ export class FactoryCode {
   static depNames(deps: string[], depFlags: InjectFlags[] | undefined, injectTokens: InjectDep[] | undefined): string[] {
     return [
       ...deps.map((token, index) => ResolveDependency.depName(token, depFlags?.[index])),
-      ...(injectTokens ?? []).map(({ token, flags }) => ResolveDependency.depName(token, flags)),
+      ...(injectTokens ?? []).map(({ token, flags, lazy }) => ResolveDependency.depName(token, flags, lazy)),
     ];
   }
 
@@ -32,7 +32,7 @@ export class FactoryCode {
     const args = deps.map((token, index) => ResolveDependency.value(`a${index}`, token, depFlags?.[index])).join(", ");
     if (!injected.length) return `function (${params}) { return ${call(args)}; }`;
 
-    const values = injected.map(({ token, flags }, index) => ResolveDependency.value(`i${index}`, token, flags));
+    const values = injected.map(({ token, flags, lazy }, index) => ResolveDependency.value(`i${index}`, token, flags, false, lazy));
     return `function (${params}) { ${InjectedValues.around({ [InjectedValues.FACTORY]: values }, `return ${call(args)};`)} }`;
   }
 
